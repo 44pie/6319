@@ -1,11 +1,11 @@
 # 6319 C2 Server v3.2
 
-gsocket-style C2 with end-to-end encryption, multi-channel architecture, and full stealth.
+Stealth C2 with end-to-end encryption, multi-channel architecture, and process masking.
 
 ## Quick Install (Any Linux VPS)
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/6319-project/6319/main/install.sh | sudo bash
+curl -fsSL https://raw.githubusercontent.com/44pie/6319/main/install.sh | sudo bash
 ```
 
 The installer will:

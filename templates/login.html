@@ -1,0 +1,111 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>6319 - Login</title>
+    <link rel="stylesheet" href="/static/style.css">
+    <style>
+        .login-container {
+            min-height: 100vh;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            background: var(--bg0);
+        }
+        .login-logo {
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 12px;
+            line-height: 1.1;
+            color: var(--accent);
+            margin-bottom: 32px;
+            text-align: center;
+            white-space: pre;
+        }
+        .login-card {
+            background: var(--bg1);
+            border-radius: 8px;
+            padding: 32px;
+            width: 100%;
+            max-width: 400px;
+            border: 1px solid var(--bg2);
+        }
+        .login-title {
+            color: var(--fg);
+            font-size: 14px;
+            text-align: center;
+            margin-bottom: 24px;
+            letter-spacing: 2px;
+        }
+        .login-input {
+            width: 100%;
+            padding: 12px 16px;
+            background: var(--bg0);
+            border: 1px solid var(--bg3);
+            border-radius: 4px;
+            color: var(--fg);
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 14px;
+            margin-bottom: 16px;
+            box-sizing: border-box;
+        }
+        .login-input:focus {
+            outline: none;
+            border-color: var(--accent);
+        }
+        .login-input::placeholder {
+            color: var(--fg3);
+        }
+        .login-btn {
+            width: 100%;
+            padding: 12px;
+            background: var(--accent);
+            border: none;
+            border-radius: 4px;
+            color: var(--bg0);
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 12px;
+            font-weight: bold;
+            letter-spacing: 1px;
+            cursor: pointer;
+            transition: background 0.2s;
+        }
+        .login-btn:hover {
+            background: var(--accent2);
+        }
+        .login-error {
+            background: rgba(191, 97, 106, 0.2);
+            border: 1px solid var(--red);
+            color: var(--red);
+            padding: 10px 14px;
+            border-radius: 4px;
+            font-size: 12px;
+            margin-bottom: 16px;
+            text-align: center;
+        }
+    </style>
+</head>
+<body>
+    <div class="login-container">
+        <pre class="login-logo">
+ ██████╗ ██████╗ ██╗ █████╗ 
+██╔════╝ ╚════██╗███║██╔══██╗
+███████╗  █████╔╝╚██║╚██████║
+██╔═══██╗ ╚═══██╗ ██║ ╚═══██║
+╚██████╔╝██████╔╝ ██║ █████╔╝
+ ╚═════╝ ╚═════╝  ╚═╝ ╚════╝ 
+</pre>
+        <div class="login-card">
+            <div class="login-title">ACCESS KEY REQUIRED</div>
+            {% if error %}
+            <div class="login-error">{{ error }}</div>
+            {% endif %}
+            <form method="POST">
+                <input type="password" name="key" class="login-input" placeholder="Enter access key" autofocus required>
+                <button type="submit" class="login-btn">AUTHENTICATE</button>
+            </form>
+        </div>
+    </div>
+</body>
+</html>

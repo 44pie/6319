@@ -49,8 +49,9 @@ AUTH_KEY = os.environ.get('AUTH_KEY', '')
 
 app.config['PERMANENT_SESSION_LIFETIME'] = timedelta(hours=24)
 app.config['SESSION_COOKIE_HTTPONLY'] = True
-app.config['SESSION_COOKIE_SAMESITE'] = 'None'
-app.config['SESSION_COOKIE_SECURE'] = True
+# Only use secure cookies on HTTPS (Replit), not on HTTP (VPS/direct IP)
+app.config['SESSION_COOKIE_SECURE'] = False
+app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'
 
 def generate_random_path(length=26):
     chars = string.ascii_lowercase + string.digits
@@ -814,6 +815,7 @@ def login_page_handler():
         key = request.form.get('key', '')
         if key == AUTH_KEY:
             session['authenticated'] = True
+            session['is_admin'] = True
             session.permanent = True
             dashboard_url = f'/{DASHBOARD_PATH}' if DASHBOARD_PATH else '/'
             return redirect(dashboard_url)

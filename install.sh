@@ -370,6 +370,10 @@ step "Downloading static assets..."
 curl -fsSL "${GITHUB_RAW}/static/style.css" -o static/style.css || err "Failed to download style.css"
 done_step "Static assets downloaded (style.css)"
 
+step "Creating users.json..."
+echo '{}' > users.json
+done_step "Users database initialized"
+
 : << 'EMBEDDED_TEMPLATES_DISABLED'
 cat > templates/index.html << 'INDEX_EOF'
 <!DOCTYPE html>

